@@ -24,9 +24,10 @@ pub use self::{
     model::{
         validated_sidebar_bounds, AgentPanelSortConfig, Config, ConfigReloadReport,
         ConfigReloadStatus, HostCursorModeConfig, NewTerminalCwdConfig, PaneBordersConfig,
-        ShellModeConfig, SidebarCollapsedModeConfig, StatusIndicatorStyle, TabBarPositionConfig,
-        ToastClipboardPosition, ToastConfig, ToastDelivery, ToastHerdrPosition,
-        UpdateChannelConfig, MAX_TOAST_DELAY_SECONDS,
+        ShellModeConfig, SidebarCollapsedModeConfig, SidebarSectionConfig, StatusIndicatorStyle,
+        TabBarPositionConfig, TabsOrientationConfig, ToastClipboardPosition, ToastConfig,
+        ToastDelivery, ToastHerdrPosition, UpdateChannelConfig, MAX_TOAST_DELAY_SECONDS,
+        SIDEBAR_SECTION_ORDERS,
     },
     sidebar::{
         AgentSidebarToken, AgentsSidebarConfig, SidebarConfig, SidebarTokenStyle,
@@ -122,6 +123,7 @@ impl Config {
             .chain(tab_bar_right_diagnostics(&self.ui.tab_bar_right))
             .chain(window_title_diagnostics(&self.ui.window_title))
             .chain(self.invalid_sidebar_bounds_diagnostic())
+            .chain(self.invalid_sidebar_section_order_diagnostic())
             .chain(self.invalid_headless_size_diagnostic())
             .collect()
     }
@@ -152,6 +154,21 @@ impl Config {
                     self.ui.sidebar_min_width, self.ui.sidebar_max_width
                 )
             })
+    }
+
+    pub(crate) fn invalid_sidebar_section_order_diagnostic(&self) -> Option<String> {
+        self.ui.sidebar_order().is_none().then(|| {
+            let order = self
+                .ui
+                .sidebar_section_order
+                .iter()
+                .map(|section| section.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "ui.sidebar_section_order must list spaces, tabs, and agents once (got [{order}])"
+            )
+        })
     }
 
     pub(crate) fn remote_image_paste_key(&self) -> Result<Option<(KeyCode, KeyModifiers)>, String> {
@@ -457,5 +474,92 @@ command = "echo one"
 
         let drawn: Config = toml::from_str("[ui]\nhost_cursor = 'drawn'\n").unwrap();
         assert_eq!(drawn.ui.host_cursor, HostCursorModeConfig::Drawn);
+    }
+
+    #[test]
+    fn ui_tabs_orientation_defaults_to_horizontal_and_parses_overrides() {
+        let default_config = Config::default();
+        assert_eq!(
+            default_config.ui.tabs_orientation,
+            TabsOrientationConfig::Horizontal
+        );
+        assert_eq!(
+            default_config.ui.sidebar_order(),
+            Some(SidebarSectionConfig::DEFAULT_ORDER)
+        );
+        assert_eq!(
+            default_config.invalid_sidebar_section_order_diagnostic(),
+            None
+        );
+
+        let vertical: Config = toml::from_str("[ui]\ntabs_orientation = 'vertical'\n").unwrap();
+        assert_eq!(
+            vertical.ui.tabs_orientation,
+            TabsOrientationConfig::Vertical
+        );
+    }
+
+    #[test]
+    fn ui_sidebar_section_order_accepts_every_permutation() {
+        for order in SIDEBAR_SECTION_ORDERS {
+            let toml = format!(
+                "[ui]\ntabs_orientation = 'vertical'\nsidebar_section_order = ['{}', '{}', '{}']\n",
+                order[0].as_str(),
+                order[1].as_str(),
+                order[2].as_str(),
+            );
+            let config: Config = toml::from_str(&toml).unwrap();
+            assert_eq!(config.ui.sidebar_order(), Some(order), "{toml}");
+            assert_eq!(config.ui.tabs_orientation, TabsOrientationConfig::Vertical);
+            assert_eq!(config.invalid_sidebar_section_order_diagnostic(), None);
+            assert!(
+                !config
+                    .collect_diagnostics()
+                    .iter()
+                    .any(|diagnostic| diagnostic.contains("sidebar_section_order")),
+                "{toml}"
+            );
+        }
+    }
+
+    #[test]
+    fn ui_sidebar_section_order_rejects_missing_duplicate_and_extra_sections() {
+        for order in [
+            "[]",
+            "['spaces', 'agents']",
+            "['spaces', 'tabs']",
+            "['spaces', 'tabs', 'spaces']",
+            "['spaces', 'tabs', 'agents', 'agents']",
+        ] {
+            let toml = format!("[ui]\nsidebar_section_order = {order}\n");
+            let config: Config = toml::from_str(&toml).unwrap();
+            assert_eq!(config.ui.sidebar_order(), None, "{toml}");
+            assert_eq!(
+                config.ui.sidebar_order_or_default(),
+                SidebarSectionConfig::DEFAULT_ORDER,
+                "{toml}"
+            );
+            let diagnostic = config
+                .invalid_sidebar_section_order_diagnostic()
+                .unwrap_or_else(|| panic!("missing diagnostic for {toml}"));
+            assert!(
+                diagnostic.contains("ui.sidebar_section_order"),
+                "{diagnostic}"
+            );
+            assert!(
+                config
+                    .collect_diagnostics()
+                    .iter()
+                    .any(|entry| entry.contains("ui.sidebar_section_order")),
+                "{toml}"
+            );
+        }
+
+        // An unknown name fails the whole [ui] section while loading, which the
+        // loader reports as an invalid section instead of applying it.
+        assert!(toml::from_str::<Config>(
+            "[ui]\nsidebar_section_order = ['spaces', 'tabs', 'panes']\n"
+        )
+        .is_err());
     }
 }

@@ -4,6 +4,8 @@ pub(crate) enum ConfigEdit<'a> {
     StatusIndicators(super::StatusIndicatorStyle),
     Sound(bool),
     ToastDelivery(super::ToastDelivery),
+    TabsOrientation(super::TabsOrientationConfig),
+    SidebarSectionOrder([super::SidebarSectionConfig; 3]),
 }
 
 impl ConfigEdit<'_> {
@@ -13,6 +15,8 @@ impl ConfigEdit<'_> {
             Self::StatusIndicators(_) => "status indicators",
             Self::Sound(_) => "sound setting",
             Self::ToastDelivery(_) => "toast setting",
+            Self::TabsOrientation(_) => "tabs orientation",
+            Self::SidebarSectionOrder(_) => "sidebar section order",
         }
     }
 
@@ -41,6 +45,25 @@ impl ConfigEdit<'_> {
                 };
                 let content = super::upsert_section_value(content, "ui.toast", "delivery", value);
                 super::remove_section_key(&content, "ui.toast", "enabled")
+            }
+            Self::TabsOrientation(orientation) => super::upsert_section_value(
+                content,
+                "ui",
+                "tabs_orientation",
+                &format!("\"{}\"", orientation.as_str()),
+            ),
+            Self::SidebarSectionOrder(order) => {
+                let entries = order
+                    .iter()
+                    .map(|section| format!("\"{}\"", section.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                super::upsert_section_value(
+                    content,
+                    "ui",
+                    "sidebar_section_order",
+                    &format!("[{entries}]"),
+                )
             }
         }
     }
@@ -104,6 +127,46 @@ mod tests {
         assert!(
             toml::from_str::<toml::Value>(&written).is_ok(),
             "written config is not valid TOML: {written:?}"
+        );
+    }
+
+    #[test]
+    fn config_edits_write_the_tab_list_settings() {
+        let content =
+            ConfigEdit::TabsOrientation(crate::config::TabsOrientationConfig::Vertical).apply("");
+        assert_eq!(content.matches("tabs_orientation").count(), 1, "{content}");
+        let parsed: crate::config::Config = toml::from_str(&content).unwrap();
+        assert_eq!(
+            parsed.ui.tabs_orientation,
+            crate::config::TabsOrientationConfig::Vertical
+        );
+
+        // Applying the same key again updates it in place.
+        let content = ConfigEdit::TabsOrientation(crate::config::TabsOrientationConfig::Horizontal)
+            .apply(&content);
+        assert_eq!(content.matches("tabs_orientation").count(), 1, "{content}");
+        let parsed: crate::config::Config = toml::from_str(&content).unwrap();
+        assert_eq!(
+            parsed.ui.tabs_orientation,
+            crate::config::TabsOrientationConfig::Horizontal
+        );
+
+        let order = [
+            crate::config::SidebarSectionConfig::Agents,
+            crate::config::SidebarSectionConfig::Spaces,
+            crate::config::SidebarSectionConfig::Tabs,
+        ];
+        let content = ConfigEdit::SidebarSectionOrder(order).apply(&content);
+        assert_eq!(
+            content.matches("sidebar_section_order").count(),
+            1,
+            "{content}"
+        );
+        let parsed: crate::config::Config = toml::from_str(&content).unwrap();
+        assert_eq!(parsed.ui.sidebar_order(), Some(order));
+        assert_eq!(
+            parsed.ui.tabs_orientation,
+            crate::config::TabsOrientationConfig::Horizontal
         );
     }
 }

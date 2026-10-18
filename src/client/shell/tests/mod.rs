@@ -66,6 +66,35 @@ pub(super) fn snapshot() -> ClientShellSnapshot {
     }
 }
 
+/// Force the desktop tab list back into the horizontal strip by hiding the
+/// sidebar: the strip is the documented fallback for every collapsed layout.
+pub(super) fn use_horizontal_tab_strip(state: &mut ClientShellState) {
+    state.config.sidebar_collapsed_mode = crate::config::SidebarCollapsedModeConfig::Hidden;
+    state.sidebar_collapsed = true;
+}
+
+/// Frame height that keeps every sidebar row visible in tests written for the
+/// pre-split sidebar: the desktop tab list now takes half of the spaces area.
+pub(super) const SIDEBAR_TEST_ROWS: u16 = 56;
+
+/// Opt into the vertical tab list: the default config keeps the horizontal
+/// strip, so every test that asserts sidebar tab rows asks for it explicitly.
+pub(super) fn use_vertical_tab_list(state: &mut ClientShellState) {
+    state.config.tabs_orientation = crate::config::TabsOrientationConfig::Vertical;
+}
+
+/// The default sidebar section order.
+pub(super) fn default_order() -> [crate::config::SidebarSectionConfig; 3] {
+    crate::config::SidebarSectionConfig::DEFAULT_ORDER
+}
+
+/// Client config with the vertical tab list enabled.
+pub(super) fn vertical_tabs_config() -> ClientShellConfig {
+    let mut config = ClientShellConfig::from_config(&Config::default());
+    config.tabs_orientation = crate::config::TabsOrientationConfig::Vertical;
+    config
+}
+
 fn worktree_list_result(open_workspace_id: Option<&str>) -> crate::api::schema::ResponseResult {
     crate::api::schema::ResponseResult::WorktreeList {
         source: crate::api::schema::WorktreeSourceInfo {
@@ -261,4 +290,5 @@ mod link_hover;
 mod mobile;
 mod mouse_selection;
 mod popup_focus_projection;
+mod sidebar_tabs;
 mod startup_overlays;

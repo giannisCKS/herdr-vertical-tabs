@@ -499,16 +499,9 @@ impl ClientShellState {
     }
 
     pub(super) fn focused_tab_count(&self) -> usize {
-        let Some(snapshot) = self.snapshot.as_deref() else {
-            return 0;
-        };
-        snapshot
-            .tabs
-            .iter()
-            .filter(|tab| {
-                Some(tab.workspace_id.as_str()) == snapshot.focused_workspace_id.as_deref()
-            })
-            .count()
+        self.snapshot
+            .as_deref()
+            .map_or(0, render::focused_tab_count)
     }
 
     #[cfg(test)]

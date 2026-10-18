@@ -13,10 +13,13 @@ fn tab_overflow_controls_scroll_the_client_owned_tab_bar() {
         focused: false,
         agent_status: AgentStatus::Idle,
     }));
-    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let mut config = ClientShellConfig::from_config(&Config::default());
+    config.mobile_width_threshold = 0;
+    let mut state = ClientShellState::new(config);
+    use_horizontal_tab_strip(&mut state);
     state.set_snapshot(Box::new(snapshot));
     state.set_pane_surface(surface());
-    state.compose(80, 20).expect("overflow tab bar");
+    state.compose(60, 20).expect("overflow tab bar");
 
     assert!(state.hits.tab_scroll_right.width > 0);
     let scroll_right = state.hits.tab_scroll_right;
@@ -36,13 +39,13 @@ fn tab_overflow_controls_scroll_the_client_owned_tab_bar() {
         tab.focused = tab.tab_id == "tab_8";
     }
     state.set_snapshot(Box::new(update));
-    state.compose(80, 20).expect("focused overflow tab");
+    state.compose(60, 20).expect("focused overflow tab");
     assert!(state.hits.tabs.iter().any(|(_, tab_id)| tab_id == "tab_8"));
 
     state.compose(300, 20).expect("tabs without overflow");
     assert_eq!(state.tab_scroll, 0);
     assert_eq!(state.hits.tabs.len(), 8);
-    state.compose(80, 20).expect("focused tab after narrowing");
+    state.compose(60, 20).expect("focused tab after narrowing");
     assert!(state.hits.tabs.iter().any(|(_, tab_id)| tab_id == "tab_8"));
 }
 
@@ -74,6 +77,7 @@ fn focused_last_overflow_tab_shows_its_full_label() {
         })
         .collect();
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    use_horizontal_tab_strip(&mut state);
     for number in [8, 7, 8] {
         let tab_id = format!("tab_{number}");
         projected.focused_tab_id = Some(tab_id.clone());
@@ -85,11 +89,11 @@ fn focused_last_overflow_tab_shows_its_full_label() {
         state.set_snapshot(Box::new(projected.clone()));
         state.set_pane_surface(surface());
         let frame = state
-            .compose(133, 20)
+            .compose(100, 20)
             .expect("reporter's overflowing strip");
         assert_eq!(
             state.hits.new_tab.right() - state.hits.tab_scroll_left.x,
-            107
+            100
         );
         let rect = state
             .hits
@@ -120,7 +124,7 @@ fn focused_last_overflow_tab_shows_its_full_label() {
         row: left.y,
         modifiers: KeyModifiers::empty(),
     })]);
-    let frame = state.compose(133, 20).expect("manual scroll left");
+    let frame = state.compose(100, 20).expect("manual scroll left");
     assert_eq!(state.tab_scroll, end_scroll - 1);
     let right = state.hits.tab_scroll_right;
     assert_eq!(
@@ -134,7 +138,7 @@ fn focused_last_overflow_tab_shows_its_full_label() {
         row: right.y,
         modifiers: KeyModifiers::empty(),
     })]);
-    let frame = state.compose(133, 20).expect("manual scroll right");
+    let frame = state.compose(100, 20).expect("manual scroll right");
     assert_eq!(state.tab_scroll, end_scroll);
     assert!(frame_rows(&frame)[0].contains("nvim test"));
     assert_eq!(

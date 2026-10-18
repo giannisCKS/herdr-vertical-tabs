@@ -149,8 +149,7 @@ fn non_overlay_ctrl_v_is_forwarded_to_the_focused_pane() {
 
 #[test]
 fn desktop_composition_keeps_shell_outside_origin_relative_surface() {
-    let config = ClientShellConfig::from_config(&Config::default());
-    let mut state = ClientShellState::new(config);
+    let mut state = ClientShellState::new(vertical_tabs_config());
     state.set_snapshot(Box::new(snapshot()));
     state.set_pane_surface(surface());
 
@@ -172,7 +171,7 @@ fn desktop_composition_keeps_shell_outside_origin_relative_surface() {
     assert!(!text.contains("1 1"));
     assert_eq!(
         frame.cursor.as_ref().map(|cursor| (cursor.x, cursor.y)),
-        Some((27, 2))
+        Some((27, 1))
     );
 }
 
@@ -936,7 +935,7 @@ fn sidebar_scrollbars_use_proportional_shared_geometry_and_drag() {
         workspace.focused = false;
         projected.workspaces.push(workspace);
     }
-    for index in 1..=10 {
+    for index in 1..=30 {
         projected.agents.push(crate::protocol::ClientShellAgent {
             pane_id: format!("agent-pane-{index}"),
             workspace_id: "ws_1".into(),
@@ -955,9 +954,13 @@ fn sidebar_scrollbars_use_proportional_shared_geometry_and_drag() {
         });
     }
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    use_vertical_tab_list(&mut state);
     state.set_snapshot(Box::new(projected));
     state.set_pane_surface(surface());
-    state.compose(106, 20).expect("overflowing sidebars");
+    // Both sidebar lists overflow so each scrollbar keeps a proportional thumb.
+    state
+        .compose(106, SIDEBAR_TEST_ROWS)
+        .expect("overflowing sidebars");
 
     for agent in [false, true] {
         let (track, metrics) = if agent {
@@ -976,7 +979,10 @@ fn sidebar_scrollbars_use_proportional_shared_geometry_and_drag() {
         };
         assert!(track.width > 0);
         let thumb = crate::ui::scrollbar_thumb(metrics, track).expect("scrollbar thumb");
-        assert!(thumb.len > 1);
+        assert!(
+            thumb.len > 1,
+            "agent={agent} track={track:?} metrics={metrics:?} thumb={thumb:?}"
+        );
         state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: track.x,

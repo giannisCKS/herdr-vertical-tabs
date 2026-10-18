@@ -175,6 +175,7 @@ fn modal_paste_inserts_clipboard_text_through_overlay_text_path() {
 #[test]
 fn client_shell_graphics_follow_final_shell_origin_and_local_overlay_visibility() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    use_vertical_tab_list(&mut state);
     state.set_snapshot(Box::new(snapshot()));
     let mut pane_surface = surface();
     let key = crate::protocol::SurfaceGraphicsAssetKey {
@@ -219,7 +220,7 @@ fn client_shell_graphics_follow_final_shell_origin_and_local_overlay_visibility(
     let visible = visible.graphics.clone().into_inline_bytes();
     let visible = String::from_utf8_lossy(&visible);
     assert!(visible.contains("a=t,t=d"));
-    assert!(visible.contains("\u{1b}[2;27H"));
+    assert!(visible.contains("\u{1b}[1;27H"));
 
     state.overlay = Some(ClientShellOverlay::Onboarding);
     let uncovered = state.compose(106, 20).expect("overlay frame");

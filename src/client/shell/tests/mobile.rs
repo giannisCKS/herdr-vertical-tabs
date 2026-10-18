@@ -6,6 +6,7 @@ fn navigate_update_status_uses_released_desktop_and_mobile_placement() {
     config.tab_bar_position = crate::config::TabBarPositionConfig::Bottom;
     config.hide_tab_bar_when_single_tab = false;
     let mut state = ClientShellState::new(config);
+    use_vertical_tab_list(&mut state);
     let mut endpoint_snapshot = snapshot();
     endpoint_snapshot.update_available = Some("0.8.3".into());
     state.set_snapshot(Box::new(endpoint_snapshot));
@@ -23,8 +24,10 @@ fn navigate_update_status_uses_released_desktop_and_mobile_placement() {
     };
     assert!(row_text(&bottom, 29).contains("update ready"));
     assert!(!row_text(&bottom, 28).contains("update ready"));
-    assert!(state.hits.tabs.is_empty());
-    assert!(state.hits.new_tab.is_empty());
+    // The bottom update bar owns the strip row; the sidebar tab list stays live.
+    assert!(state.hits.tabs.iter().all(|(rect, _)| rect.y != 29));
+    assert_ne!(state.hits.new_tab.y, 29);
+    assert!(!state.hits.tabs.is_empty());
     assert!(state.hits.tab_scroll_left.is_empty());
     assert!(state.hits.tab_scroll_right.is_empty());
 

@@ -1,4 +1,54 @@
-# herdr
+# Herdr with vertical tabs
+
+**Unofficial fork of [Herdr](https://github.com/herdrdev/herdr).** This fork adds
+optional vertical tabs and configurable sidebar section ordering. It is not an
+official Herdr release or an upstream-approved feature.
+
+## What this fork changes
+
+- Choose **Horizontal** (default) or **Vertical** tabs in Settings.
+- In vertical mode, browse the active space's tabs in the sidebar, including
+  tabs without agents.
+- Scroll Spaces, Tabs, and Agents independently.
+- Choose any of the six top-to-bottom orders of **Spaces**, **Tabs**, and
+  **Agents** in Settings. Choices persist across restarts.
+- Keep existing tab actions and keyboard shortcuts. A horizontal strip remains
+  available when the sidebar cannot display the vertical list.
+
+Panel ordering uses Settings, not drag-and-drop panel rearrangement.
+
+## Try this fork
+
+The upstream installer and release links below install **official Herdr**, not
+this fork. To try these changes, install the upstream build prerequisites
+(including Rust and Zig 0.16.0), then build this repository:
+
+```sh
+git clone https://github.com/giannisCKS/herdr-vertical-tabs.git
+cd herdr-vertical-tabs
+cargo build --release --locked
+./target/release/herdr
+```
+
+Open Settings to enable Vertical tabs and select a sidebar section order.
+No personal settings or session data are bundled with this fork.
+
+**Back up your existing executable, configuration, and saved state first.**
+Release builds use the normal Herdr configuration and state directories; debug
+builds use separate `herdr-dev` directories. Replacing an executable does not
+upgrade an already-running server. Stopping that server terminates its pane
+processes and agents; saved layouts do not preserve running processes.
+An official update may replace a locally installed custom build.
+
+Focused sidebar/settings tests, formatting, and Clippy passed locally. Full CI
+remains unverified because `cargo-nextest` was unavailable; Windows validation
+is also pending. See [FORK.md](FORK.md) for details and rollback guidance.
+
+Related feature discussion: [herdrdev/herdr #4367](https://github.com/herdrdev/herdr/discussions/4367).
+
+---
+
+## Upstream Herdr
 
 
 <p align="center">

@@ -880,6 +880,24 @@ pub enum TabBarPositionConfig {
     Bottom,
 }
 
+/// Where the tab list renders. Default: horizontal (the desktop tab row).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TabsOrientationConfig {
+    #[default]
+    Horizontal,
+    Vertical,
+}
+
+impl TabsOrientationConfig {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Horizontal => "horizontal",
+            Self::Vertical => "vertical",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PaneBordersConfig {
     #[default]
@@ -934,6 +952,62 @@ impl<'de> Deserialize<'de> for PaneBordersConfig {
     }
 }
 
+/// One of the sections stacked in the left sidebar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SidebarSectionConfig {
+    Spaces,
+    Tabs,
+    Agents,
+}
+
+impl SidebarSectionConfig {
+    /// Sections in the default top-to-bottom order.
+    pub const DEFAULT_ORDER: [Self; 3] = [Self::Spaces, Self::Tabs, Self::Agents];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Spaces => "spaces",
+            Self::Tabs => "tabs",
+            Self::Agents => "agents",
+        }
+    }
+}
+
+/// Every accepted `ui.sidebar_section_order` permutation, top to bottom.
+pub const SIDEBAR_SECTION_ORDERS: [[SidebarSectionConfig; 3]; 6] = [
+    [
+        SidebarSectionConfig::Spaces,
+        SidebarSectionConfig::Tabs,
+        SidebarSectionConfig::Agents,
+    ],
+    [
+        SidebarSectionConfig::Spaces,
+        SidebarSectionConfig::Agents,
+        SidebarSectionConfig::Tabs,
+    ],
+    [
+        SidebarSectionConfig::Tabs,
+        SidebarSectionConfig::Spaces,
+        SidebarSectionConfig::Agents,
+    ],
+    [
+        SidebarSectionConfig::Tabs,
+        SidebarSectionConfig::Agents,
+        SidebarSectionConfig::Spaces,
+    ],
+    [
+        SidebarSectionConfig::Agents,
+        SidebarSectionConfig::Spaces,
+        SidebarSectionConfig::Tabs,
+    ],
+    [
+        SidebarSectionConfig::Agents,
+        SidebarSectionConfig::Tabs,
+        SidebarSectionConfig::Spaces,
+    ],
+];
+
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct UiConfig {
@@ -982,7 +1056,11 @@ pub struct UiConfig {
     pub show_agent_labels_on_pane_borders: bool,
     /// Hide the tab row when the workspace has one tab. Default: false.
     pub hide_tab_bar_when_single_tab: bool,
-    /// Desktop tab row placement. Default: top.
+    /// Where the tab list renders: the desktop tab row (horizontal) or a
+    /// scrollable list in the left sidebar below the spaces (vertical).
+    /// Saved values are "horizontal" or "vertical". Default: "horizontal".
+    pub tabs_orientation: TabsOrientationConfig,
+    /// Desktop tab row placement. Only used when tabs are horizontal. Default: top.
     pub tab_bar_position: TabBarPositionConfig,
     /// Ordered entries shown at the right edge of the desktop tab row. Empty by default.
     pub tab_bar_right: Vec<TabBarRightEntryConfig>,
@@ -1000,6 +1078,11 @@ pub struct UiConfig {
     pub status_indicators: StatusIndicatorStyle,
     /// Expanded sidebar row composition.
     pub sidebar: SidebarConfig,
+    /// Top-to-bottom order of the sidebar sections: any permutation of
+    /// "spaces", "tabs", and "agents". Tabs only appear in the sidebar when
+    /// tabs_orientation is vertical; the relative order of spaces and agents
+    /// still applies. Default: spaces, tabs, agents.
+    pub sidebar_section_order: Vec<SidebarSectionConfig>,
     /// Accent color for highlights, borders, and navigation UI.
     /// Accepts hex (#89b4fa), named colors (cyan, blue), or RGB (rgb(137,180,250)).
     pub accent: String,
@@ -1219,6 +1302,7 @@ impl Default for UiConfig {
             pane_gaps: true,
             show_agent_labels_on_pane_borders: false,
             hide_tab_bar_when_single_tab: false,
+            tabs_orientation: TabsOrientationConfig::Horizontal,
             tab_bar_position: TabBarPositionConfig::Top,
             tab_bar_right: Vec::new(),
             tab_bar_right_separator: " ".into(),
@@ -1227,6 +1311,7 @@ impl Default for UiConfig {
             _legacy_agent_panel_scope: None,
             status_indicators: StatusIndicatorStyle::Dots,
             sidebar: SidebarConfig::default(),
+            sidebar_section_order: SidebarSectionConfig::DEFAULT_ORDER.to_vec(),
             accent: "cyan".into(),
             toast: ToastConfig::default(),
             sound: SoundConfig::default(),
@@ -1235,6 +1320,32 @@ impl Default for UiConfig {
 }
 
 impl UiConfig {
+    /// The configured section order, or `None` when the list does not name
+    /// each sidebar section exactly once.
+    pub fn sidebar_order(&self) -> Option<[SidebarSectionConfig; 3]> {
+        let order =
+            <[SidebarSectionConfig; 3]>::try_from(self.sidebar_section_order.as_slice()).ok()?;
+        let mut seen = [false; 3];
+        for section in order {
+            let slot = match section {
+                SidebarSectionConfig::Spaces => 0,
+                SidebarSectionConfig::Tabs => 1,
+                SidebarSectionConfig::Agents => 2,
+            };
+            if std::mem::replace(&mut seen[slot], true) {
+                return None;
+            }
+        }
+        Some(order)
+    }
+
+    /// The section order in use: the configured permutation, or the default
+    /// order when the configured list is invalid.
+    pub fn sidebar_order_or_default(&self) -> [SidebarSectionConfig; 3] {
+        self.sidebar_order()
+            .unwrap_or(SidebarSectionConfig::DEFAULT_ORDER)
+    }
+
     pub fn mouse_scroll_lines(&self) -> usize {
         self.mouse_scroll_lines
             .map(NonZeroUsize::get)

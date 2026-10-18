@@ -17,6 +17,20 @@ fn indicator_index(style: crate::config::StatusIndicatorStyle) -> usize {
     usize::from(style == crate::config::StatusIndicatorStyle::Symbols)
 }
 
+fn orientation_index(orientation: crate::config::TabsOrientationConfig) -> usize {
+    match orientation {
+        crate::config::TabsOrientationConfig::Horizontal => 0,
+        crate::config::TabsOrientationConfig::Vertical => 1,
+    }
+}
+
+fn sidebar_order_index(order: [crate::config::SidebarSectionConfig; 3]) -> usize {
+    crate::config::SIDEBAR_SECTION_ORDERS
+        .iter()
+        .position(|candidate| *candidate == order)
+        .unwrap_or(0)
+}
+
 fn toast_index(delivery: crate::config::ToastDelivery) -> usize {
     match delivery {
         crate::config::ToastDelivery::Off => 0,
@@ -52,6 +66,10 @@ impl ClientShellState {
             ClientSettingsSection::Sound => usize::from(!self.config.sound_enabled),
             ClientSettingsSection::Toast => toast_index(self.config.toast_delivery),
             ClientSettingsSection::Integrations => 0,
+            ClientSettingsSection::Tabs => orientation_index(self.config.tabs_orientation),
+            ClientSettingsSection::Sidebar => {
+                sidebar_order_index(self.config.sidebar_section_order)
+            }
         }
     }
 
@@ -100,6 +118,8 @@ impl ClientShellState {
                 ClientSettingsSection::Indicators | ClientSettingsSection::Sound => 2,
                 ClientSettingsSection::Toast => 4,
                 ClientSettingsSection::Integrations => settings.integrations.len(),
+                ClientSettingsSection::Tabs => 2,
+                ClientSettingsSection::Sidebar => crate::config::SIDEBAR_SECTION_ORDERS.len(),
             },
             _ => 0,
         }
@@ -223,6 +243,27 @@ impl ClientShellState {
                 );
             }
             ClientSettingsSection::Integrations => self.install_recommended_integrations(outcome),
+            ClientSettingsSection::Tabs => {
+                let orientation = if selected == 0 {
+                    crate::config::TabsOrientationConfig::Horizontal
+                } else {
+                    crate::config::TabsOrientationConfig::Vertical
+                };
+                self.save_settings_edit(
+                    crate::config::ConfigEdit::TabsOrientation(orientation),
+                    outcome,
+                );
+            }
+            ClientSettingsSection::Sidebar => {
+                let Some(order) = crate::config::SIDEBAR_SECTION_ORDERS.get(selected).copied()
+                else {
+                    return;
+                };
+                self.save_settings_edit(
+                    crate::config::ConfigEdit::SidebarSectionOrder(order),
+                    outcome,
+                );
+            }
         }
     }
 

@@ -69,6 +69,7 @@ impl ClientShellState {
     }
 
     pub(crate) fn reload_client_config(&mut self) {
+        let tabs_orientation = self.config.tabs_orientation;
         match crate::config::load_live_config() {
             Ok(loaded) => {
                 let agent_panel_sort = self.config.agent_panel_sort;
@@ -105,6 +106,13 @@ impl ClientShellState {
                 self.set_local_config_diagnostic(self.config.local_config_diagnostic(&diagnostics));
             }
         }
+        if self.config.tabs_orientation != tabs_orientation {
+            // The tab list moved between the tab bar and the sidebar: start
+            // over so the focused tab is revealed in its new place.
+            self.tab_scroll = 0;
+            self.reveal_focused_tab = true;
+            self.last_tab_viewport = None;
+        }
         self.reconcile_input_source();
     }
 }
@@ -120,6 +128,8 @@ impl ClientShellConfig {
             sidebar_collapsed_mode: config.ui.sidebar_collapsed_mode,
             mobile_width_threshold: config.ui.mobile_width_threshold,
             tab_bar_position: config.ui.tab_bar_position,
+            tabs_orientation: config.ui.tabs_orientation,
+            sidebar_section_order: config.ui.sidebar_order_or_default(),
             hide_tab_bar_when_single_tab: config.ui.hide_tab_bar_when_single_tab,
             spaces: config.ui.sidebar.spaces.clone(),
             agents: config.ui.sidebar.agents.clone(),
@@ -336,7 +346,10 @@ impl ClientShellConfig {
         }
 
         if !invalid_section("ui") {
-            if let Some(diagnostic) = config.invalid_sidebar_bounds_diagnostic() {
+            if let Some(diagnostic) = config
+                .invalid_sidebar_bounds_diagnostic()
+                .or_else(|| config.invalid_sidebar_section_order_diagnostic())
+            {
                 diagnostics.push(format!("{diagnostic}; keeping previous [ui] settings"));
             } else {
                 let ui = &config.ui;
@@ -347,6 +360,8 @@ impl ClientShellConfig {
                 self.sidebar_collapsed_mode = ui.sidebar_collapsed_mode;
                 self.mobile_width_threshold = ui.mobile_width_threshold;
                 self.tab_bar_position = ui.tab_bar_position;
+                self.tabs_orientation = ui.tabs_orientation;
+                self.sidebar_section_order = ui.sidebar_order_or_default();
                 self.hide_tab_bar_when_single_tab = ui.hide_tab_bar_when_single_tab;
                 self.spaces = ui.sidebar.spaces.clone();
                 self.agents = ui.sidebar.agents.clone();
@@ -382,25 +397,14 @@ impl ClientShellConfig {
         diagnostics
     }
 
-    pub(super) fn layout(
+    /// Desktop width of the sidebar for the current collapse mode.
+    pub(super) fn effective_sidebar_width(
         &self,
         cols: u16,
-        rows: u16,
         sidebar_collapsed: bool,
-        tab_count: usize,
         sidebar_width: u16,
-    ) -> ClientShellLayout {
-        if cols <= self.mobile_width_threshold {
-            let header_height = rows.min(2);
-            return ClientShellLayout {
-                sidebar: Rect::default(),
-                tab_bar: Rect::default(),
-                mobile_header: Rect::new(0, 0, cols, header_height),
-                pane_surface: Rect::new(0, header_height, cols, rows.saturating_sub(header_height)),
-            };
-        }
-
-        let sidebar_width = if sidebar_collapsed {
+    ) -> u16 {
+        if sidebar_collapsed {
             match self.sidebar_collapsed_mode {
                 SidebarCollapsedModeConfig::Compact => 4,
                 SidebarCollapsedModeConfig::Hidden => 0,
@@ -413,10 +417,34 @@ impl ClientShellConfig {
             .unwrap_or((18, 36));
             sidebar_width.clamp(min, max)
         }
-        .min(cols.saturating_sub(1));
+        .min(cols.saturating_sub(1))
+    }
+
+    /// Desktop layout. `tab_bar_rows` reserves the tab strip, and
+    /// `sidebar_tabs` records that the tab list renders inside the sidebar.
+    pub(super) fn layout(
+        &self,
+        cols: u16,
+        rows: u16,
+        sidebar_collapsed: bool,
+        sidebar_width: u16,
+        tab_bar_rows: u16,
+        sidebar_tabs: bool,
+    ) -> ClientShellLayout {
+        if cols <= self.mobile_width_threshold {
+            let header_height = rows.min(2);
+            return ClientShellLayout {
+                sidebar: Rect::default(),
+                tab_bar: Rect::default(),
+                mobile_header: Rect::new(0, 0, cols, header_height),
+                pane_surface: Rect::new(0, header_height, cols, rows.saturating_sub(header_height)),
+                sidebar_tabs: false,
+            };
+        }
+
+        let sidebar_width = self.effective_sidebar_width(cols, sidebar_collapsed, sidebar_width);
         let main = Rect::new(sidebar_width, 0, cols.saturating_sub(sidebar_width), rows);
-        let show_tab_bar = rows > 1 && !(self.hide_tab_bar_when_single_tab && tab_count == 1);
-        let tab_height = u16::from(show_tab_bar);
+        let tab_height = if rows > 1 { tab_bar_rows.min(rows) } else { 0 };
         let (tab_bar, pane_surface) = match self.tab_bar_position {
             TabBarPositionConfig::Top => (
                 Rect::new(main.x, 0, main.width, tab_height),
@@ -443,6 +471,7 @@ impl ClientShellConfig {
             tab_bar,
             mobile_header: Rect::default(),
             pane_surface,
+            sidebar_tabs,
         }
     }
 
@@ -460,7 +489,14 @@ impl ClientShellConfig {
             .unwrap_or(self.sidebar_width)
             .clamp(min_width, max_width);
         let surface = self
-            .layout(cols, rows, sidebar_collapsed, 0, sidebar_width)
+            .layout(
+                cols,
+                rows,
+                sidebar_collapsed,
+                sidebar_width,
+                u16::from(rows > 1),
+                false,
+            )
             .pane_surface;
         ClientSurfaceSize {
             cols: surface.width.max(1),

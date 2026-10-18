@@ -68,7 +68,20 @@ fn workspace_rect(state: &ClientShellState, endpoint: &ClientEndpointId, workspa
                 .then_some(*rect)
             })
         })
-        .expect("visible workspace")
+        .unwrap_or_else(|| {
+            panic!(
+                "visible workspace {workspace:?} on {endpoint:?}: mode={:?}, sidebar hits={:?}, mobile hits={}, machines={}",
+                state.mode,
+                state
+                    .hits
+                    .workspaces
+                    .iter()
+                    .map(|hit| hit.workspace_id.as_str())
+                    .collect::<Vec<_>>(),
+                state.hits.mobile_targets.len(),
+                state.hits.machines.len(),
+            )
+        })
 }
 
 #[test]
@@ -89,12 +102,16 @@ fn local_navigation_highlight_stays_visible_with_terminal_theme() {
             state.set_snapshot(Box::new(workspaces(3)));
             state.set_pane_surface(surface());
             state.sidebar_collapsed = compact;
-            state.compose(100, 28).unwrap();
+            state.compose(100, SIDEBAR_TEST_ROWS).unwrap();
             enter_navigation(&mut state);
 
             for workspace_id in ["ws_1", "ws_2"] {
                 assert_selected(&state, &ClientEndpointId::Local, workspace_id);
-                let buffer = state.compose(100, 28).unwrap().to_ratatui_buffer().unwrap();
+                let buffer = state
+                    .compose(100, SIDEBAR_TEST_ROWS)
+                    .unwrap()
+                    .to_ratatui_buffer()
+                    .unwrap();
                 let selected = workspace_rect(&state, &ClientEndpointId::Local, workspace_id);
                 for y in selected.y..selected.bottom() {
                     for x in selected.x..selected.right() {
@@ -131,7 +148,11 @@ fn local_navigation_highlight_stays_visible_with_terminal_theme() {
                 Some("ws_1")
             );
             preview_key(&mut state, b"\x1b");
-            let buffer = state.compose(100, 28).unwrap().to_ratatui_buffer().unwrap();
+            let buffer = state
+                .compose(100, SIDEBAR_TEST_ROWS)
+                .unwrap()
+                .to_ratatui_buffer()
+                .unwrap();
             let focused = workspace_rect(&state, &ClientEndpointId::Local, "ws_1");
             assert_eq!(
                 buffer[(focused.x, focused.y)].bg,
@@ -155,7 +176,7 @@ fn navigation_highlights_only_the_preview_and_activates_on_enter() {
             if terminal_theme {
                 state.config.palette = Palette::terminal();
             }
-            state.compose(cols, 28).unwrap();
+            state.compose(cols, SIDEBAR_TEST_ROWS).unwrap();
             enter_navigation(&mut state);
             for (endpoint, collision, steps) in [
                 (&ClientEndpointId::Local, &remote, 1),
@@ -166,7 +187,7 @@ fn navigation_highlights_only_the_preview_and_activates_on_enter() {
                 }
                 assert_selected(&state, endpoint, "ws_2");
                 let buffer = state
-                    .compose(cols, 28)
+                    .compose(cols, SIDEBAR_TEST_ROWS)
                     .unwrap()
                     .to_ratatui_buffer()
                     .unwrap();
@@ -331,10 +352,10 @@ fn foreign_workspace_preview_blocks_paste_into_hidden_copy_search() {
 fn mouse_clicks_cancel_remote_workspace_navigation() {
     for pane in [false, true] {
         let (mut state, _) = state_with_remote();
-        state.compose(100, 28).unwrap();
+        state.compose(100, SIDEBAR_TEST_ROWS).unwrap();
         enter_navigation(&mut state);
         preview_key(&mut state, b"\x1b[B");
-        state.compose(100, 28).unwrap();
+        state.compose(100, SIDEBAR_TEST_ROWS).unwrap();
         let rect = if pane {
             state.hits.panes[0].inner_rect
         } else {
@@ -591,7 +612,7 @@ fn local_navigation_state(compact: bool) -> ClientShellState {
     state.sidebar_collapsed = compact;
     state.set_snapshot(Box::new(workspaces(3)));
     state.set_pane_surface(surface());
-    state.compose(100, 28).unwrap();
+    state.compose(100, SIDEBAR_TEST_ROWS).unwrap();
     state
 }
 
@@ -612,7 +633,11 @@ fn request_local_navigation(state: &mut ClientShellState, down: usize) -> String
 }
 
 fn assert_local_highlight(state: &mut ClientShellState, selected_id: &str) {
-    let buffer = state.compose(100, 28).unwrap().to_ratatui_buffer().unwrap();
+    let buffer = state
+        .compose(100, SIDEBAR_TEST_ROWS)
+        .unwrap()
+        .to_ratatui_buffer()
+        .unwrap();
     for workspace_id in ["ws_1", "ws_2", "ws_3"] {
         let rect = workspace_rect(state, &ClientEndpointId::Local, workspace_id);
         assert_eq!(
@@ -877,7 +902,7 @@ fn direct_agent_focus_repaints_when_releasing_a_workspace_highlight() {
         let mut state = local_navigation_state(false);
         state.config.keybinds = ClientShellConfig::from_config(&config).keybinds;
         state.set_snapshot(Box::new(projected.clone()));
-        state.compose(100, 28).unwrap();
+        state.compose(100, SIDEBAR_TEST_ROWS).unwrap();
         if pending {
             request_local_navigation(&mut state, 2);
             assert_local_highlight(&mut state, "ws_3");

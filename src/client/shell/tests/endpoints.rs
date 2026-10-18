@@ -794,7 +794,9 @@ fn machine_navigation_does_not_require_a_local_snapshot_or_surface() {
 #[test]
 fn sidebar_renders_local_and_saved_ssh_endpoints_with_status() {
     let (mut state, _) = state_with_remote();
-    let frame = state.compose(100, 28).expect("combined endpoint frame");
+    let frame = state
+        .compose(100, SIDEBAR_TEST_ROWS)
+        .expect("combined endpoint frame");
     let text = frame
         .cells
         .chunks(frame.width as usize)
@@ -831,7 +833,9 @@ fn sidebar_renders_local_and_saved_ssh_endpoints_with_status() {
     );
 
     state.sidebar_collapsed = true;
-    let frame = state.compose(100, 28).expect("collapsed endpoint frame");
+    let frame = state
+        .compose(100, SIDEBAR_TEST_ROWS)
+        .expect("collapsed endpoint frame");
     let local = state
         .hits
         .machines
@@ -897,7 +901,7 @@ fn saved_machine_preserves_endpoint_scoped_worktree_collapses() {
     state.activate_context_menu_item(toggle_index, &mut ClientShellInput::default());
 
     let frame = state
-        .compose(100, 28)
+        .compose(100, SIDEBAR_TEST_ROWS)
         .expect("collapsed local worktree group");
     assert!(!state
         .hits
@@ -930,7 +934,7 @@ fn saved_machine_preserves_endpoint_scoped_worktree_collapses() {
     remote_surface.boot_id = "remote-boot".into();
     state.set_pane_surface(remote_surface);
     state
-        .compose(100, 28)
+        .compose(100, SIDEBAR_TEST_ROWS)
         .expect("active remote worktree group");
     let mut switch = ClientShellInput::default();
     state.record_binding(
@@ -996,7 +1000,9 @@ fn saved_machine_preserves_endpoint_scoped_worktree_collapses() {
         row: remote_toggle.y,
         modifiers: KeyModifiers::empty(),
     })]);
-    state.compose(100, 28).expect("both groups collapsed");
+    state
+        .compose(100, SIDEBAR_TEST_ROWS)
+        .expect("both groups collapsed");
     assert!(!state
         .hits
         .workspaces
@@ -1017,7 +1023,9 @@ fn saved_machine_preserves_endpoint_scoped_worktree_collapses() {
         row: local_toggle.y,
         modifiers: KeyModifiers::empty(),
     })]);
-    state.compose(100, 28).expect("only remote group collapsed");
+    state
+        .compose(100, SIDEBAR_TEST_ROWS)
+        .expect("only remote group collapsed");
     assert!(state
         .hits
         .workspaces
@@ -1102,7 +1110,11 @@ fn expanded_machine_sidebar_reveals_newly_focused_workspace() {
 #[test]
 fn expanded_machine_sidebar_applies_space_row_gap_within_each_machine() {
     let (mut state, remote_id) = state_with_remote();
+    use_vertical_tab_list(&mut state);
     state.config.spaces.row_gap = 1;
+    // The machine section keeps the rows its workspaces need; the tab split
+    // comes out of the remaining upper area.
+    state.sidebar_section_split = 0.8;
 
     let add_second_workspace = |snapshot: &mut ClientShellSnapshot| {
         let mut workspace = snapshot.workspaces[0].clone();
@@ -1183,7 +1195,9 @@ fn expanded_machine_sidebar_applies_space_row_gap_within_each_machine() {
     );
 
     state.workspace_scroll = usize::MAX;
-    state.compose(100, 18).expect("scrolled endpoint frame");
+    // Small enough to scroll the machine section, tall enough to keep the
+    // whole remote workspace block visible after scrolling.
+    state.compose(100, 30).expect("scrolled endpoint frame");
     let metrics = state
         .hits
         .workspace_scroll_metrics
@@ -1946,7 +1960,9 @@ fn machine_arrow_toggles_inactive_machine_without_switching() {
             state.sidebar_collapsed = sidebar_collapsed;
 
             for collapsed in [true, false] {
-                let frame = state.compose(100, 28).expect("three machine frame");
+                let frame = state
+                    .compose(100, SIDEBAR_TEST_ROWS)
+                    .expect("three machine frame");
                 let machine = state
                     .hits
                     .machines
@@ -1988,7 +2004,9 @@ fn machine_arrow_toggles_inactive_machine_without_switching() {
                 assert!(!state.collapsed_endpoints.contains(&other_id));
                 assert!(state.endpoint_error.is_none());
 
-                state.compose(100, 28).expect("toggled machine frame");
+                state
+                    .compose(100, SIDEBAR_TEST_ROWS)
+                    .expect("toggled machine frame");
                 assert_eq!(
                     state
                         .hits
@@ -2012,7 +2030,9 @@ fn machine_arrow_toggles_inactive_machine_without_switching() {
 #[test]
 fn context_menu_lookup_ignores_inactive_endpoint_workspaces() {
     let (mut state, endpoint_id) = state_with_remote();
-    state.compose(100, 28).expect("combined endpoint frame");
+    state
+        .compose(100, SIDEBAR_TEST_ROWS)
+        .expect("combined endpoint frame");
     let remote = state
         .hits
         .workspaces
@@ -2714,7 +2734,9 @@ fn focus_agent_index_uses_online_aggregate_rows() {
 #[test]
 fn workspace_drag_rejects_foreign_endpoint_slots() {
     let (mut state, endpoint_id) = state_with_remote();
-    state.compose(100, 28).expect("aggregate sidebar");
+    state
+        .compose(100, SIDEBAR_TEST_ROWS)
+        .expect("aggregate sidebar");
     let local = state
         .hits
         .workspaces
@@ -2802,6 +2824,64 @@ fn navigator_workspace_arrows_cross_machine_headings_without_activating_them() {
 }
 
 #[test]
+fn endpoint_sidebar_lists_the_active_workspace_tabs_between_machines_and_agents() {
+    let (mut state, _remote) = state_with_remote();
+    use_vertical_tab_list(&mut state);
+    let mut projection = (**state.snapshot.as_ref().expect("local snapshot")).clone();
+    projection.tabs.push(ClientShellTab {
+        tab_id: "tab_2".into(),
+        workspace_id: "ws_1".into(),
+        number: 2,
+        label: "logs".into(),
+        custom_label: true,
+        zoomed: false,
+        focused: false,
+        agent_status: crate::api::schema::AgentStatus::Idle,
+    });
+    state.set_snapshot(Box::new(projection));
+    state.set_pane_surface(surface());
+    state
+        .compose(106, SIDEBAR_TEST_ROWS)
+        .expect("endpoint sidebar");
+
+    let layout = state.layout(106, 20);
+    assert!(layout.sidebar_tabs);
+    assert_eq!(layout.tab_bar.height, 0);
+    assert!(state.hits.machines.len() >= 2, "both machines stay listed");
+    assert!(state.hits.tabs_vertical);
+    assert_eq!(state.hits.tabs.len(), 2);
+    let machine_row = state.hits.machines[0].rect;
+    let first_tab = state.hits.tabs[0].0;
+    assert!(
+        machine_row.bottom() <= first_tab.y,
+        "tabs sit below machines"
+    );
+    assert!(
+        state.hits.agent_body.y > state.hits.tabs[1].0.bottom(),
+        "agents sit below the tab list"
+    );
+
+    let row = state.hits.tabs[1].0;
+    state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: row.x + 1,
+        row: row.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    let click = state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: row.x + 1,
+        row: row.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert!(matches!(
+        &click.actions[..],
+        [ClientShellAction::Endpoint { request, .. }]
+            if matches!(&request.method, crate::api::schema::Method::TabFocus(target) if target.tab_id == "tab_2")
+    ));
+}
+
+#[test]
 fn navigator_foreign_workspace_heading_keeps_the_workspace_target() {
     let (mut state, endpoint_id) = state_with_remote();
     state.open_navigator_overlay();
@@ -2838,4 +2918,87 @@ fn navigator_foreign_workspace_heading_keeps_the_workspace_target() {
             target: Some(ClientEndpointFocusTarget::Workspace(workspace_id)),
         }] if activated == &endpoint_id && workspace_id == "ws_1"
     ));
+}
+
+/// The tab list and the section order drive the multi-machine sidebar the same
+/// way they drive the single-snapshot sidebar.
+#[test]
+fn expanded_sidebar_follows_the_tab_list_settings_for_every_order() {
+    use crate::ui::expanded_sidebar_tabs_sections;
+
+    for order in crate::config::SIDEBAR_SECTION_ORDERS {
+        let (mut state, _) = state_with_remote();
+        let mut config = vertical_tabs_config();
+        config.sidebar_section_order = order;
+        state.config = config;
+        state
+            .compose(100, SIDEBAR_TEST_ROWS)
+            .expect("endpoint frame with the sidebar tab list");
+
+        let layout = state.layout(100, SIDEBAR_TEST_ROWS);
+        assert!(layout.sidebar_tabs, "{order:?}: tab list enabled");
+        let sections =
+            expanded_sidebar_tabs_sections(layout.sidebar, state.sidebar_section_split, 1, order);
+        let tabs = sections.tabs.expect("tab section");
+        assert_eq!(state.hits.tabs_body.y, tabs.y + 2, "{order:?}");
+        assert_eq!(state.hits.tabs_body.bottom(), tabs.bottom(), "{order:?}");
+        assert_eq!(state.hits.agent_body.y, sections.agents.y + 3, "{order:?}");
+        assert_eq!(
+            state.hits.sidebar_section_divider, sections.divider,
+            "{order:?}: the draggable row follows the visible boundary"
+        );
+        assert_eq!(
+            state.hits.sidebar_section_above, sections.divider_above,
+            "{order:?}"
+        );
+        for machine in &state.hits.machines {
+            assert!(
+                machine.rect.y >= sections.primary.y
+                    && machine.rect.bottom() <= sections.primary.bottom(),
+                "{order:?}: machine rows stay in the spaces block"
+            );
+        }
+        assert!(
+            state
+                .hits
+                .workspaces
+                .iter()
+                .all(|workspace| workspace.rect.y >= sections.primary.y
+                    && workspace.rect.bottom() <= sections.primary.bottom()),
+            "{order:?}: workspace rows stay in the spaces block"
+        );
+
+        let mut horizontal = vertical_tabs_config();
+        horizontal.tabs_orientation = crate::config::TabsOrientationConfig::Horizontal;
+        horizontal.sidebar_section_order = order;
+        state.config = horizontal;
+        state
+            .compose(100, SIDEBAR_TEST_ROWS)
+            .expect("endpoint frame with the horizontal strip");
+        let layout = state.layout(100, SIDEBAR_TEST_ROWS);
+        assert!(
+            !layout.sidebar_tabs,
+            "{order:?}: horizontal keeps the strip"
+        );
+        let sections =
+            expanded_sidebar_tabs_sections(layout.sidebar, state.sidebar_section_split, 0, order);
+        assert!(sections.tabs.is_none(), "{order:?}");
+        assert_eq!(
+            state.hits.sidebar_section_divider, sections.divider,
+            "{order:?}: divider still matches the geometry"
+        );
+        let first_agent_row = state.hits.agent_body.y;
+        let first_space_row = state.hits.machines[0].rect.y;
+        if sections.agents.y < sections.primary.y {
+            assert!(
+                first_agent_row < first_space_row,
+                "{order:?}: agents sit above the spaces"
+            );
+        } else {
+            assert!(
+                first_space_row < first_agent_row,
+                "{order:?}: spaces sit above the agents"
+            );
+        }
+    }
 }

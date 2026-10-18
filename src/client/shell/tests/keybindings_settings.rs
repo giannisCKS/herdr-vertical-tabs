@@ -268,9 +268,10 @@ fn tab_bar_renders_endpoint_status_ellipses_and_clamps_to_useful_scroll() {
     let mut config = ClientShellConfig::from_config(&Config::default());
     config.mobile_width_threshold = 0;
     let mut state = ClientShellState::new(config);
+    use_horizontal_tab_strip(&mut state);
     state.set_snapshot(Box::new(projected));
     state.set_pane_surface(surface());
-    let frame = state.compose(106, 20).expect("status and overflow tabs");
+    let frame = state.compose(60, 20).expect("status and overflow tabs");
     let top = frame.cells[..frame.width as usize]
         .iter()
         .map(|cell| cell.symbol.as_str())
@@ -280,7 +281,7 @@ fn tab_bar_renders_endpoint_status_ellipses_and_clamps_to_useful_scroll() {
 
     state.tab_scroll = usize::MAX;
     state.reveal_focused_tab = false;
-    state.compose(106, 20).expect("clamped tab scroll");
+    state.compose(60, 20).expect("clamped tab scroll");
     assert!(state.tab_scroll < 7);
     let manual_scroll = state.tab_scroll;
     let mut replacement = (**state.snapshot.as_ref().expect("snapshot")).clone();
@@ -291,11 +292,11 @@ fn tab_bar_renders_endpoint_status_ellipses_and_clamps_to_useful_scroll() {
     state.set_snapshot(Box::new(replacement));
     state.set_pane_surface(replacement_surface);
     assert!(!state.reveal_focused_tab);
-    state.compose(106, 20).expect("same-width status update");
+    state.compose(60, 20).expect("same-width status update");
     assert_eq!(state.tab_scroll, manual_scroll);
 
-    state.compose(45, 20).expect("narrow tabs win over status");
-    let narrow = state.compose(45, 20).expect("narrow tab frame");
+    state.compose(28, 20).expect("narrow tabs win over status");
+    let narrow = state.compose(28, 20).expect("narrow tab frame");
     let top = narrow.cells[..narrow.width as usize]
         .iter()
         .map(|cell| cell.symbol.as_str())

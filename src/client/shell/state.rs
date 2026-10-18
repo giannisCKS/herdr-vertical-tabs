@@ -1,4 +1,5 @@
 use super::*;
+use crate::ui::SidebarSectionAbove;
 
 pub(super) const MIN_TAB_WIDTH: u16 = 8;
 pub(super) const NEW_TAB_WIDTH: u16 = 3;
@@ -20,6 +21,8 @@ pub(crate) struct ClientShellConfig {
     pub(super) sidebar_collapsed_mode: SidebarCollapsedModeConfig,
     pub(super) mobile_width_threshold: u16,
     pub(super) tab_bar_position: TabBarPositionConfig,
+    pub(super) tabs_orientation: crate::config::TabsOrientationConfig,
+    pub(super) sidebar_section_order: [crate::config::SidebarSectionConfig; 3],
     pub(super) hide_tab_bar_when_single_tab: bool,
     pub(super) spaces: SpacesSidebarConfig,
     pub(super) agents: crate::config::AgentsSidebarConfig,
@@ -59,6 +62,8 @@ pub(super) struct ClientShellLayout {
     pub tab_bar: Rect,
     pub mobile_header: Rect,
     pub pane_surface: Rect,
+    /// The tab list renders inside the expanded sidebar instead of the tab bar.
+    pub sidebar_tabs: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,6 +95,11 @@ pub(super) struct ShellHitMap {
     pub(super) workspace_scroll_metrics: Option<crate::pane::ScrollMetrics>,
     pub(super) workspace_max_scroll: usize,
     pub(super) tabs: Vec<(Rect, String)>,
+    pub(super) tabs_body: Rect,
+    pub(super) tabs_scrollbar: Rect,
+    pub(super) tabs_scroll_metrics: Option<crate::pane::ScrollMetrics>,
+    pub(super) tabs_max_scroll: usize,
+    pub(super) tabs_vertical: bool,
     pub(super) panes: Vec<PaneHit>,
     pub(super) popup: Option<PaneHit>,
     pub(super) pane_splits: Vec<PaneSplitHit>,
@@ -102,6 +112,7 @@ pub(super) struct ShellHitMap {
     pub(super) agent_sort_toggle: Rect,
     pub(super) sidebar_divider: Rect,
     pub(super) sidebar_section_divider: Rect,
+    pub(super) sidebar_section_above: SidebarSectionAbove,
     pub(super) sidebar_toggle: Rect,
     pub(super) new_workspace: Rect,
     pub(super) new_tab: Rect,
@@ -193,6 +204,9 @@ pub(super) enum ClientChromeDrag {
         grab_row_offset: u16,
     },
     AgentScrollbar {
+        grab_row_offset: u16,
+    },
+    TabsScrollbar {
         grab_row_offset: u16,
     },
     HelpScrollbar {
@@ -388,6 +402,8 @@ pub(super) enum ClientSettingsSection {
     Sound,
     Toast,
     Integrations,
+    Tabs,
+    Sidebar,
 }
 
 impl ClientSettingsSection {
@@ -397,6 +413,8 @@ impl ClientSettingsSection {
         Self::Sound,
         Self::Toast,
         Self::Integrations,
+        Self::Tabs,
+        Self::Sidebar,
     ];
 
     pub(super) fn label(self) -> &'static str {
@@ -406,6 +424,8 @@ impl ClientSettingsSection {
             Self::Sound => "sound",
             Self::Toast => "toasts",
             Self::Integrations => "integrations",
+            Self::Tabs => "tabs",
+            Self::Sidebar => "sidebar",
         }
     }
 }
@@ -891,7 +911,7 @@ pub(crate) struct ClientShellState {
     pub(super) reveal_mobile_workspace: bool,
     pub(super) mobile_switcher_suspended: bool,
     pub(super) reveal_focused_tab: bool,
-    pub(super) last_tab_bar_width: Option<u16>,
+    pub(super) last_tab_viewport: Option<(u16, u16)>,
     pub(super) last_composed_size: Option<(u16, u16)>,
     pub(super) last_composed_at: Option<std::time::Instant>,
     pub(super) selection_repaint_deadline: Option<std::time::Instant>,
@@ -1065,7 +1085,7 @@ impl ClientShellState {
             reveal_mobile_workspace: false,
             mobile_switcher_suspended: false,
             reveal_focused_tab: true,
-            last_tab_bar_width: None,
+            last_tab_viewport: None,
             last_composed_size: None,
             last_composed_at: None,
             selection_repaint_deadline: None,
@@ -1219,13 +1239,66 @@ impl ClientShellState {
     }
 
     pub(super) fn layout(&self, cols: u16, rows: u16) -> ClientShellLayout {
+        let tab_count = self.focused_tab_count();
+        let sidebar_tabs = self.sidebar_tabs_enabled(cols, rows, tab_count);
         self.config.layout(
             cols,
             rows,
             self.sidebar_collapsed,
-            self.focused_tab_count(),
             self.sidebar_width,
+            self.tab_bar_rows(cols, rows, tab_count, sidebar_tabs),
+            sidebar_tabs,
         )
+    }
+
+    /// The tab list moves into the expanded sidebar when the upper sidebar area
+    /// can list spaces and tabs together.
+    fn sidebar_tabs_enabled(&self, cols: u16, rows: u16, tab_count: usize) -> bool {
+        if self.config.tabs_orientation != crate::config::TabsOrientationConfig::Vertical {
+            return false;
+        }
+        if cols <= self.config.mobile_width_threshold || self.sidebar_collapsed {
+            return false;
+        }
+        if tab_count == 0 || (self.config.hide_tab_bar_when_single_tab && tab_count == 1) {
+            return false;
+        }
+        let width =
+            self.config
+                .effective_sidebar_width(cols, self.sidebar_collapsed, self.sidebar_width);
+        if width == 0 {
+            return false;
+        }
+        crate::ui::expanded_sidebar_tabs_sections(
+            Rect::new(0, 0, width, rows),
+            self.sidebar_section_split,
+            tab_count,
+            self.config.sidebar_section_order,
+        )
+        .tabs
+        .is_some()
+    }
+
+    /// Rows reserved for the horizontal tab bar: the full strip for the tab
+    /// list, otherwise only the right-side status segments while the tab list
+    /// lives in the sidebar.
+    fn tab_bar_rows(&self, cols: u16, rows: u16, tab_count: usize, sidebar_tabs: bool) -> u16 {
+        if cols <= self.config.mobile_width_threshold || rows <= 1 {
+            return 0;
+        }
+        if !sidebar_tabs {
+            return u16::from(!(self.config.hide_tab_bar_when_single_tab && tab_count == 1));
+        }
+        let status_width = self
+            .snapshot
+            .as_deref()
+            .map_or(0, render::tab_bar_status_width);
+        let main_width = cols.saturating_sub(self.config.effective_sidebar_width(
+            cols,
+            self.sidebar_collapsed,
+            self.sidebar_width,
+        ));
+        u16::from(render::tab_status_fits(main_width, status_width))
     }
 
     pub(crate) fn surface_size(&self, cols: u16, rows: u16) -> ClientSurfaceSize {
@@ -1253,7 +1326,7 @@ impl ClientShellState {
         self.reveal_mobile_workspace = false;
         self.mobile_switcher_suspended = false;
         self.reveal_focused_tab = true;
-        self.last_tab_bar_width = None;
+        self.last_tab_viewport = None;
         self.last_composed_size = None;
         self.last_composed_at = None;
         self.selection_repaint_deadline = None;
@@ -1429,6 +1502,9 @@ impl ClientShellState {
             != snapshot.focused_workspace_id.as_deref()
         {
             self.reveal_focused_workspace = true;
+            // The tab list follows the focused workspace; start it at the top.
+            self.tab_scroll = 0;
+            self.reveal_focused_tab = true;
         }
         if tab_layout_changed
             || self

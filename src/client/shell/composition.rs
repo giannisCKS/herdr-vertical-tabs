@@ -79,20 +79,44 @@ impl ClientShellState {
             workspace_drop_indicator_row: None,
         };
         if let Some(snapshot) = local_snapshot {
+            let sections = crate::ui::expanded_sidebar_tabs_sections(
+                sidebar,
+                self.sidebar_section_split,
+                if layout.sidebar_tabs {
+                    render::focused_tab_count(snapshot)
+                } else {
+                    0
+                },
+                self.config.sidebar_section_order,
+            );
             render::render_sidebar(
                 &mut buffer,
                 sidebar,
                 snapshot,
                 &self.config,
+                &sections,
                 &mut render_state,
                 &mut self.hits,
             );
         } else {
+            let sections = crate::ui::expanded_sidebar_tabs_sections(
+                sidebar,
+                self.sidebar_section_split,
+                if layout.sidebar_tabs {
+                    self.snapshot
+                        .as_deref()
+                        .map_or(0, render::focused_tab_count)
+                } else {
+                    0
+                },
+                self.config.sidebar_section_order,
+            );
             super::endpoint_sidebar::render_expanded(
                 &mut buffer,
                 sidebar,
                 self.snapshot.as_deref(),
                 &self.config,
+                &sections,
                 &mut render_state,
                 &mut self.hits,
             );
@@ -186,8 +210,13 @@ impl ClientShellState {
             return None;
         }
         let layout = self.layout(cols, rows);
-        if self.last_tab_bar_width != Some(layout.tab_bar.width) {
-            self.last_tab_bar_width = Some(layout.tab_bar.width);
+        let tab_viewport = if layout.sidebar_tabs {
+            (layout.sidebar.width, layout.sidebar.height)
+        } else {
+            (layout.tab_bar.width, layout.tab_bar.height)
+        };
+        if self.last_tab_viewport != Some(tab_viewport) {
+            self.last_tab_viewport = Some(tab_viewport);
             self.reveal_focused_tab = true;
         }
         let tab_drag_insert_index = match &self.chrome_drag {
@@ -332,7 +361,7 @@ impl ClientShellState {
                 &self.config.palette,
             )
         };
-        if mode_bar == Some(layout.tab_bar) {
+        if mode_bar == Some(layout.tab_bar) && !layout.sidebar_tabs {
             self.hits.tabs.clear();
             self.hits.new_tab = Rect::default();
             self.hits.tab_scroll_left = Rect::default();

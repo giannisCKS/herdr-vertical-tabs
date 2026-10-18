@@ -4,6 +4,27 @@ use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 const SELECTION_AUTOSCROLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(30);
 const SELECTION_REPAINT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
 
+/// Drop index of a vertical tab list: the visible tab row under the pointer is
+/// the slot the dragged tab lands in, and dropping below the list appends.
+///
+/// Rows are one cell tall, so there is no before/after split inside a row; the
+/// pointer's row selects the destination boundary directly. Leaving the tab
+/// column horizontally cancels the drop, matching the strip's row constraint.
+fn tab_drop_index_at_row(visible: &[(usize, Rect)], point: (u16, u16)) -> Option<usize> {
+    let (_, first_rect) = *visible.first()?;
+    let (last_index, last_rect) = *visible.last()?;
+    if point.0 < first_rect.x || point.0 >= first_rect.right() {
+        return None;
+    }
+    if let Some((index, _)) = visible
+        .iter()
+        .find(|(_, rect)| point.1 >= rect.y && point.1 < rect.bottom())
+    {
+        return Some(*index);
+    }
+    (point.1 >= last_rect.bottom()).then_some(last_index + 1)
+}
+
 impl ClientShellState {
     fn set_sidebar_width_from_column(&mut self, column: u16, outcome: &mut ClientShellInput) {
         let (min, max) = crate::config::validated_sidebar_bounds(
@@ -26,8 +47,11 @@ impl ClientShellState {
         if divider.height == 0 {
             return;
         }
-        let ratio = row.saturating_sub(divider.y) as f32 / divider.height as f32;
-        let ratio = ratio.clamp(0.1, 0.9);
+        let above = row.saturating_sub(divider.y);
+        let ratio = self
+            .hits
+            .sidebar_section_above
+            .split_ratio(above, divider.height);
         if (self.sidebar_section_split - ratio).abs() > f32::EPSILON {
             self.sidebar_section_split = ratio;
             self.sidebar_section_split_manual = true;
@@ -470,6 +494,9 @@ impl ClientShellState {
             .collect::<Vec<_>>();
         let (first_index, first_rect) = *visible.first()?;
         let (last_index, last_rect) = *visible.last()?;
+        if self.hits.tabs_vertical {
+            return tab_drop_index_at_row(&visible, point);
+        }
         let on_tab_row = point.1 == first_rect.y;
         if !on_tab_row {
             return None;
@@ -1062,6 +1089,22 @@ impl ClientShellState {
                     }
                     return;
                 }
+                Some(ClientChromeDrag::TabsScrollbar { grab_row_offset }) => {
+                    if let Some(metrics) = self.hits.tabs_scroll_metrics {
+                        let offset = crate::ui::scrollbar_offset_from_drag_row(
+                            metrics,
+                            self.hits.tabs_scrollbar,
+                            mouse.row,
+                            *grab_row_offset,
+                        );
+                        let next = metrics.max_offset_from_bottom.saturating_sub(offset);
+                        if next != self.tab_scroll {
+                            self.tab_scroll = next;
+                            outcome.repaint = true;
+                        }
+                    }
+                    return;
+                }
                 Some(ClientChromeDrag::NavigatorScrollbar { grab_row_offset }) => {
                     if let Some(metrics) = self.hits.navigator_scroll_metrics {
                         let offset = crate::ui::scrollbar_offset_from_drag_row(
@@ -1362,6 +1405,7 @@ impl ClientShellState {
                     }
                     ClientChromeDrag::WorkspaceScrollbar { .. }
                     | ClientChromeDrag::AgentScrollbar { .. }
+                    | ClientChromeDrag::TabsScrollbar { .. }
                     | ClientChromeDrag::HelpScrollbar { .. }
                     | ClientChromeDrag::NavigatorScrollbar { .. }
                     | ClientChromeDrag::ProductAnnouncementScrollbar { .. }
@@ -1866,14 +1910,36 @@ impl ClientShellState {
                 }
             }
             MouseEventKind::ScrollUp
-                if self
-                    .hits
-                    .tabs
-                    .iter()
-                    .any(|(rect, _)| super::contains(*rect, point))
-                    || super::contains(self.hits.tab_scroll_left, point)
-                    || super::contains(self.hits.tab_scroll_right, point)
-                    || super::contains(self.hits.new_tab, point) =>
+                if self.hits.tabs_vertical && super::contains(self.hits.tabs_body, point) =>
+            {
+                let next = self.tab_scroll.saturating_sub(1);
+                if next != self.tab_scroll {
+                    self.tab_scroll = next;
+                    outcome.repaint = true;
+                }
+            }
+            MouseEventKind::ScrollDown
+                if self.hits.tabs_vertical && super::contains(self.hits.tabs_body, point) =>
+            {
+                let next = self
+                    .tab_scroll
+                    .saturating_add(1)
+                    .min(self.hits.tabs_max_scroll);
+                if next != self.tab_scroll {
+                    self.tab_scroll = next;
+                    outcome.repaint = true;
+                }
+            }
+            MouseEventKind::ScrollUp
+                if !self.hits.tabs_vertical
+                    && (self
+                        .hits
+                        .tabs
+                        .iter()
+                        .any(|(rect, _)| super::contains(*rect, point))
+                        || super::contains(self.hits.tab_scroll_left, point)
+                        || super::contains(self.hits.tab_scroll_right, point)
+                        || super::contains(self.hits.new_tab, point)) =>
             {
                 self.record_binding(
                     crate::input::KeybindMatch::Action(crate::input::KeybindAction::PreviousTab),
@@ -1881,14 +1947,15 @@ impl ClientShellState {
                 );
             }
             MouseEventKind::ScrollDown
-                if self
-                    .hits
-                    .tabs
-                    .iter()
-                    .any(|(rect, _)| super::contains(*rect, point))
-                    || super::contains(self.hits.tab_scroll_left, point)
-                    || super::contains(self.hits.tab_scroll_right, point)
-                    || super::contains(self.hits.new_tab, point) =>
+                if !self.hits.tabs_vertical
+                    && (self
+                        .hits
+                        .tabs
+                        .iter()
+                        .any(|(rect, _)| super::contains(*rect, point))
+                        || super::contains(self.hits.tab_scroll_left, point)
+                        || super::contains(self.hits.tab_scroll_right, point)
+                        || super::contains(self.hits.new_tab, point)) =>
             {
                 self.record_binding(
                     crate::input::KeybindMatch::Action(crate::input::KeybindAction::NextTab),
@@ -2016,6 +2083,30 @@ impl ClientShellState {
                             let next = metrics.max_offset_from_bottom.saturating_sub(offset);
                             if next != self.agent_scroll {
                                 self.agent_scroll = next;
+                                outcome.repaint = true;
+                            }
+                        }
+                    }
+                    return;
+                }
+                if super::contains(self.hits.tabs_scrollbar, point) {
+                    if let Some(metrics) = self.hits.tabs_scroll_metrics {
+                        if let Some(grab_row_offset) = crate::ui::scrollbar_thumb_grab_offset(
+                            metrics,
+                            self.hits.tabs_scrollbar,
+                            mouse.row,
+                        ) {
+                            self.chrome_drag =
+                                Some(ClientChromeDrag::TabsScrollbar { grab_row_offset });
+                        } else {
+                            let offset = crate::ui::scrollbar_offset_from_row(
+                                metrics,
+                                self.hits.tabs_scrollbar,
+                                mouse.row,
+                            );
+                            let next = metrics.max_offset_from_bottom.saturating_sub(offset);
+                            if next != self.tab_scroll {
+                                self.tab_scroll = next;
                                 outcome.repaint = true;
                             }
                         }
@@ -2398,5 +2489,29 @@ impl ClientShellState {
             },
             outcome,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tab_drop_index_at_row;
+    use ratatui::layout::Rect;
+
+    #[test]
+    fn vertical_tab_drop_index_uses_the_row_under_the_pointer() {
+        let visible = [
+            (0, Rect::new(4, 5, 10, 1)),
+            (1, Rect::new(4, 6, 10, 1)),
+            (2, Rect::new(4, 7, 10, 1)),
+        ];
+        assert_eq!(tab_drop_index_at_row(&visible, (13, 6)), Some(1));
+        assert_eq!(tab_drop_index_at_row(&visible, (4, 5)), Some(0));
+        assert_eq!(tab_drop_index_at_row(&visible, (10, 7)), Some(2));
+        // Above the list cancels, below the list appends.
+        assert_eq!(tab_drop_index_at_row(&visible, (4, 4)), None);
+        assert_eq!(tab_drop_index_at_row(&visible, (4, 8)), Some(3));
+        // Leaving the tab column cancels the drop.
+        assert_eq!(tab_drop_index_at_row(&visible, (3, 7)), None);
+        assert_eq!(tab_drop_index_at_row(&visible, (14, 7)), None);
     }
 }

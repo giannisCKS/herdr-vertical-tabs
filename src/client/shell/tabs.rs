@@ -236,12 +236,26 @@ pub(crate) fn tab_bar_status_width(snapshot: &ClientShellSnapshot) -> u16 {
 
 fn tab_bar_status_area(snapshot: &ClientShellSnapshot, area: Rect) -> Option<Rect> {
     let width = tab_bar_status_width(snapshot);
-    if width == 0 {
-        return None;
-    }
-    let reserved = width.saturating_add(1);
-    (area.width.saturating_sub(reserved) >= MIN_TAB_STRIP_WIDTH)
+    tab_status_fits(area.width, width)
         .then(|| Rect::new(area.right().saturating_sub(width), area.y, width, 1))
+}
+
+/// Whether the right-side status segments keep a strip of `area_width`.
+///
+/// The strip yields to the tabs and their controls on a narrow terminal, so the
+/// sidebar tab list keeps the same rule when the tab bar collapses to status.
+pub(crate) fn tab_status_fits(area_width: u16, status_width: u16) -> bool {
+    status_width > 0
+        && area_width.saturating_sub(status_width.saturating_add(1)) >= MIN_TAB_STRIP_WIDTH
+}
+
+/// Tabs of the focused workspace: the list the tab chrome shows.
+pub(crate) fn focused_tab_count(snapshot: &ClientShellSnapshot) -> usize {
+    snapshot
+        .tabs
+        .iter()
+        .filter(|tab| Some(tab.workspace_id.as_str()) == snapshot.focused_workspace_id.as_deref())
+        .count()
 }
 
 fn tab_bar_content_area(snapshot: &ClientShellSnapshot, area: Rect) -> Rect {
@@ -379,9 +393,210 @@ fn tab_label(tab: &ClientShellTab) -> String {
     }
 }
 
+/// The status segments keep their strip while the tab list itself lives in the
+/// sidebar, so `ui.tab_bar_right` entries stay visible.
+pub(crate) fn render_tab_status_bar(
+    buffer: &mut Buffer,
+    area: Rect,
+    snapshot: &ClientShellSnapshot,
+    config: &ClientShellConfig,
+) {
+    if area.is_empty() {
+        return;
+    }
+    buffer.set_style(area, Style::default().bg(config.palette.panel_bg));
+    render_tab_bar_status(buffer, area, snapshot, &config.palette);
+}
+
+/// Tab list of the focused workspace, rendered between spaces and agents.
+pub(crate) fn render_sidebar_tabs(
+    buffer: &mut Buffer,
+    area: Rect,
+    snapshot: &ClientShellSnapshot,
+    config: &ClientShellConfig,
+    tab_scroll: &mut usize,
+    reveal_focused_tab: &mut bool,
+    tab_drag_insert_index: Option<usize>,
+    hits: &mut ShellHitMap,
+) {
+    let palette = &config.palette;
+    if area.is_empty() {
+        *reveal_focused_tab = false;
+        return;
+    }
+    put_text(
+        buffer,
+        area.x,
+        area.y,
+        area.width,
+        &"─".repeat(area.width as usize),
+        Style::default().fg(palette.surface_dim),
+    );
+    if area.height < crate::ui::SIDEBAR_TABS_CHROME_ROWS {
+        *reveal_focused_tab = false;
+        return;
+    }
+    let header_y = area.y + 1;
+    put_text(
+        buffer,
+        area.x,
+        header_y,
+        area.width,
+        " tabs",
+        Style::default()
+            .fg(palette.overlay0)
+            .add_modifier(Modifier::BOLD),
+    );
+    if config.mouse_capture {
+        let width = NEW_TAB_WIDTH.min(area.width);
+        hits.new_tab = Rect::new(area.right().saturating_sub(width), header_y, width, 1);
+        put_text(
+            buffer,
+            hits.new_tab.x,
+            hits.new_tab.y,
+            hits.new_tab.width,
+            " + ",
+            Style::default().fg(palette.overlay1),
+        );
+    }
+
+    let body = Rect::new(
+        area.x,
+        area.y.saturating_add(crate::ui::SIDEBAR_TABS_CHROME_ROWS),
+        area.width,
+        area.height
+            .saturating_sub(crate::ui::SIDEBAR_TABS_CHROME_ROWS),
+    );
+    hits.tabs_vertical = true;
+    hits.tabs_body = body;
+    let tabs = snapshot
+        .tabs
+        .iter()
+        .filter(|tab| Some(tab.workspace_id.as_str()) == snapshot.focused_workspace_id.as_deref())
+        .collect::<Vec<_>>();
+    let reveal = !body.is_empty() && std::mem::take(reveal_focused_tab);
+    if body.is_empty() || tabs.is_empty() {
+        *tab_scroll = 0;
+        hits.tabs_scroll_metrics = Some(crate::pane::ScrollMetrics {
+            offset_from_bottom: 0,
+            max_offset_from_bottom: 0,
+            viewport_rows: 0,
+        });
+        return;
+    }
+
+    let row_heights = vec![1_u16; tabs.len()];
+    let gaps = vec![0_u16; tabs.len()];
+    let mut metrics =
+        super::scroll::list_scroll_metrics(&row_heights, &gaps, body.height, *tab_scroll);
+    if reveal {
+        if let Some(target) = tabs.iter().position(|tab| tab.focused) {
+            *tab_scroll = super::scroll::list_scroll_start_to_reveal(
+                &row_heights,
+                &gaps,
+                body.height,
+                *tab_scroll,
+                target,
+            );
+            metrics =
+                super::scroll::list_scroll_metrics(&row_heights, &gaps, body.height, *tab_scroll);
+        }
+    }
+    hits.tabs_max_scroll = metrics.max_offset_from_bottom;
+    hits.tabs_scroll_metrics = Some(metrics);
+    *tab_scroll = metrics
+        .max_offset_from_bottom
+        .saturating_sub(metrics.offset_from_bottom);
+
+    let show_scrollbar = metrics.max_offset_from_bottom > 0 && body.width > 1;
+    let content_width = body.width.saturating_sub(u16::from(show_scrollbar));
+    let mut y = body.y;
+    for tab in tabs.iter().skip(*tab_scroll) {
+        if y >= body.bottom() {
+            break;
+        }
+        let rect = Rect::new(body.x, y, content_width, 1);
+        let style = if tab.focused {
+            let base = Style::default()
+                .fg(panel_contrast_fg(palette))
+                .bg(palette.accent);
+            if tab.custom_label {
+                base.add_modifier(Modifier::BOLD)
+            } else {
+                base
+            }
+        } else if tab.custom_label {
+            Style::default().fg(palette.overlay1).bg(palette.surface0)
+        } else {
+            Style::default().fg(palette.overlay0).bg(palette.surface0)
+        };
+        let name = tab_label(tab);
+        let label_width = display_width(&name).min(rect.width.saturating_sub(1));
+        let text = format!(
+            " {name}{empty:padding$}",
+            empty = "",
+            padding = rect.width.saturating_sub(1 + label_width) as usize,
+        );
+        put_text(buffer, rect.x, rect.y, rect.width, &text, style);
+        hits.tabs.push((rect, tab.tab_id.clone()));
+        y = y.saturating_add(1);
+    }
+
+    if show_scrollbar {
+        let track = Rect::new(body.right().saturating_sub(1), body.y, 1, body.height);
+        hits.tabs_scrollbar = track;
+        super::scroll::render_list_scrollbar(buffer, track, metrics, palette);
+    }
+
+    if let Some(insert_index) = tab_drag_insert_index {
+        if let Some(row) = tab_drop_indicator_row(hits, &tabs, insert_index, body) {
+            put_text(
+                buffer,
+                body.x,
+                row,
+                body.width,
+                &"─".repeat(body.width as usize),
+                Style::default().fg(palette.accent),
+            );
+        }
+    }
+}
+
+/// Row the dragged tab lands on: the tab row under the drop point, clamped to
+/// the visible rows of the sidebar tab list.
+fn tab_drop_indicator_row(
+    hits: &ShellHitMap,
+    tabs: &[&ClientShellTab],
+    insert_index: usize,
+    body: Rect,
+) -> Option<u16> {
+    let visible = hits
+        .tabs
+        .iter()
+        .filter_map(|(rect, tab_id)| {
+            tabs.iter()
+                .position(|tab| tab.tab_id == *tab_id)
+                .map(|index| (index, *rect))
+        })
+        .collect::<Vec<_>>();
+    let (first_index, first_rect) = *visible.first()?;
+    let (last_index, last_rect) = *visible.last()?;
+    let row = if insert_index <= first_index {
+        first_rect.y
+    } else if insert_index > last_index {
+        last_rect.y
+    } else {
+        visible
+            .iter()
+            .find(|(index, _)| *index == insert_index)
+            .map_or(last_rect.y, |(_, rect)| rect.y)
+    };
+    (row >= body.y && row < body.bottom()).then_some(row)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::max_tab_scroll;
+    use super::*;
 
     #[test]
     fn trailing_scroll_limit_accounts_for_full_widths_and_separators() {
@@ -401,5 +616,40 @@ mod tests {
                 "widths={widths:?}, available={available}"
             );
         }
+    }
+
+    #[test]
+    fn tab_status_strip_requires_room_beside_the_tabs() {
+        assert!(!tab_status_fits(80, 0));
+        assert!(!tab_status_fits(28, 11));
+        assert!(tab_status_fits(29, 11));
+        assert!(tab_status_fits(80, 11));
+    }
+
+    #[test]
+    fn sidebar_tab_drop_indicator_stays_inside_the_visible_rows() {
+        let tab = |tab_id: &str| ClientShellTab {
+            tab_id: tab_id.into(),
+            workspace_id: "ws_1".into(),
+            number: 1,
+            label: tab_id.into(),
+            custom_label: false,
+            zoomed: false,
+            focused: false,
+            agent_status: crate::api::schema::AgentStatus::Idle,
+        };
+        let tabs = [tab("tab_1"), tab("tab_2")];
+        let tabs = tabs.iter().collect::<Vec<_>>();
+        let mut hits = ShellHitMap::default();
+        hits.tabs.push((Rect::new(4, 6, 10, 1), "tab_1".into()));
+        hits.tabs.push((Rect::new(4, 7, 10, 1), "tab_2".into()));
+        let body = Rect::new(4, 6, 10, 2);
+        assert_eq!(tab_drop_indicator_row(&hits, &tabs, 0, body), Some(6));
+        assert_eq!(tab_drop_indicator_row(&hits, &tabs, 1, body), Some(7));
+        assert_eq!(tab_drop_indicator_row(&hits, &tabs, 2, body), Some(7));
+        assert_eq!(
+            tab_drop_indicator_row(&hits, &tabs, 0, Rect::new(4, 9, 10, 1)),
+            None
+        );
     }
 }

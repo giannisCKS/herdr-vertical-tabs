@@ -1039,9 +1039,11 @@ fn tab_click_waits_for_release_and_drag_reorders_by_stable_id() {
         projected.tabs.push(tab);
     }
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    use_vertical_tab_list(&mut state);
     state.set_snapshot(Box::new(projected));
     state.set_pane_surface(surface());
     state.compose(106, 20).expect("three tabs");
+    assert!(state.hits.tabs_vertical);
     let first = state.hits.tabs[0].0;
     let third = state.hits.tabs[2].0;
 
@@ -1054,7 +1056,7 @@ fn tab_click_waits_for_release_and_drag_reorders_by_stable_id() {
     assert!(down.actions.is_empty());
     let drag = state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
         kind: MouseEventKind::Drag(MouseButton::Left),
-        column: third.right().saturating_sub(1),
+        column: first.x + 1,
         row: third.y,
         modifiers: KeyModifiers::empty(),
     })]);
@@ -1063,21 +1065,21 @@ fn tab_click_waits_for_release_and_drag_reorders_by_stable_id() {
         state.chrome_drag,
         Some(ClientChromeDrag::Tab {
             ref tab_id,
-            insert_index: Some(3),
+            insert_index: Some(2),
             ..
         }) if tab_id == "tab_1"
     ));
     let frame = state.compose(106, 20).expect("tab drop indicator");
-    assert!(frame
-        .cells
+    let indicator_row = usize::from(third.y) * usize::from(frame.width);
+    assert!(frame.cells
+        [indicator_row + usize::from(third.x)..indicator_row + usize::from(third.right())]
         .iter()
-        .take(frame.width as usize)
-        .any(|cell| cell.symbol == "│"));
+        .all(|cell| cell.symbol == "─"));
 
     let release =
         state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
             kind: MouseEventKind::Up(MouseButton::Left),
-            column: third.right().saturating_sub(1),
+            column: first.x + 1,
             row: third.y,
             modifiers: KeyModifiers::empty(),
         })]);
@@ -1087,7 +1089,7 @@ fn tab_click_waits_for_release_and_drag_reorders_by_stable_id() {
     assert!(matches!(
         &request.method,
         crate::api::schema::Method::TabMove(params)
-            if params.tab_id == "tab_1" && params.insert_index == 3
+            if params.tab_id == "tab_1" && params.insert_index == 2
     ));
 
     state.compose(106, 20).expect("tabs after drag");
@@ -1112,7 +1114,7 @@ fn tab_click_waits_for_release_and_drag_reorders_by_stable_id() {
 }
 
 #[test]
-fn tab_drag_clears_its_drop_target_after_leaving_the_tab_row() {
+fn tab_drag_clears_its_drop_target_after_leaving_the_tab_column() {
     let mut projected = snapshot();
     for index in 2..=3 {
         let mut tab = projected.tabs[0].clone();
@@ -1123,6 +1125,7 @@ fn tab_drag_clears_its_drop_target_after_leaving_the_tab_row() {
         projected.tabs.push(tab);
     }
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    use_vertical_tab_list(&mut state);
     state.set_snapshot(Box::new(projected));
     state.set_pane_surface(surface());
     state.compose(106, 20).expect("three tabs");
@@ -1140,10 +1143,11 @@ fn tab_drag_clears_its_drop_target_after_leaving_the_tab_row() {
         row: third.y,
         modifiers: KeyModifiers::empty(),
     })]);
+    // Leaving the tab column (into the pane area) clears the drop target.
     state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
         kind: MouseEventKind::Drag(MouseButton::Left),
-        column: third.x,
-        row: third.y + 1,
+        column: third.right(),
+        row: third.y,
         modifiers: KeyModifiers::empty(),
     })]);
     assert!(matches!(
@@ -1156,16 +1160,68 @@ fn tab_drag_clears_its_drop_target_after_leaving_the_tab_row() {
     let release =
         state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
             kind: MouseEventKind::Up(MouseButton::Left),
-            column: third.x,
-            row: third.y + 1,
+            column: third.right(),
+            row: third.y,
             modifiers: KeyModifiers::empty(),
         })]);
     assert!(release.actions.is_empty());
 }
 
 #[test]
+fn tab_drag_below_the_sidebar_list_moves_the_tab_to_the_end() {
+    let mut projected = snapshot();
+    for index in 2..=3 {
+        let mut tab = projected.tabs[0].clone();
+        tab.tab_id = format!("tab_{index}");
+        tab.number = index;
+        tab.label = index.to_string();
+        tab.focused = false;
+        projected.tabs.push(tab);
+    }
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    use_vertical_tab_list(&mut state);
+    state.set_snapshot(Box::new(projected));
+    state.set_pane_surface(surface());
+    state.compose(106, 20).expect("three tabs");
+    let first = state.hits.tabs[0].0;
+    let last = state.hits.tabs[2].0;
+    state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: first.x + 1,
+        row: first.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Left),
+        column: last.x + 1,
+        row: last.y + 1,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert!(matches!(
+        state.chrome_drag,
+        Some(ClientChromeDrag::Tab {
+            insert_index: Some(3),
+            ..
+        })
+    ));
+    let release = state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: last.x + 1,
+        row: last.y + 1,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert!(matches!(
+        &release.actions[..],
+        [ClientShellAction::Endpoint { request, .. }]
+            if matches!(&request.method, crate::api::schema::Method::TabMove(params)
+                if params.tab_id == "tab_1" && params.insert_index == 3)
+    ));
+}
+
+#[test]
 fn tab_wheel_switches_tabs_without_changing_overflow_scroll() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    use_horizontal_tab_strip(&mut state);
     state.set_snapshot(Box::new(snapshot()));
     state.set_pane_surface(surface());
     state.compose(106, 20).expect("tab bar");
@@ -1189,6 +1245,75 @@ fn tab_wheel_switches_tabs_without_changing_overflow_scroll() {
     assert_eq!(state.tab_scroll, 0);
     state.compose(106, 20).expect("tab bar after wheel");
     assert!(state.hits.tabs.iter().any(|(_, tab_id)| tab_id == "tab_1"));
+}
+
+#[test]
+fn sidebar_tab_wheel_scrolls_the_tab_list_and_keeps_manual_scroll() {
+    let mut projected = snapshot();
+    for index in 2..=9 {
+        let mut tab = projected.tabs[0].clone();
+        tab.tab_id = format!("tab_{index}");
+        tab.number = index;
+        tab.label = index.to_string();
+        tab.focused = false;
+        projected.tabs.push(tab);
+    }
+    projected.focused_tab_id = Some("tab_1".into());
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    use_vertical_tab_list(&mut state);
+    state.set_snapshot(Box::new(projected));
+    state.set_pane_surface(surface());
+    state.compose(106, 20).expect("overflowing sidebar tabs");
+    assert!(state.hits.tabs_vertical);
+    assert!(state.hits.tabs_max_scroll > 0);
+    let first = state.hits.tabs[0].0;
+
+    let wheel = state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: first.x,
+        row: first.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert!(wheel.repaint);
+    assert!(
+        wheel.actions.is_empty(),
+        "wheel scrolls instead of switching"
+    );
+    assert_eq!(state.tab_scroll, 1);
+
+    let last = state.hits.tabs.last().expect("visible tab row").0;
+    let wheel = state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: last.x,
+        row: last.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert!(wheel.repaint);
+    assert_eq!(state.tab_scroll, 0);
+
+    // Scrolling up at the top of the list is a no-op, not a repaint.
+    let wheel = state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: first.x,
+        row: first.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert!(!wheel.repaint);
+    assert_eq!(state.tab_scroll, 0);
+
+    // Manual scroll survives unrelated snapshot updates that keep the list shape.
+    state.tab_scroll = 2;
+    state.reveal_focused_tab = false;
+    state.compose(106, 20).expect("manual scroll");
+    assert_eq!(state.tab_scroll, 2);
+    let mut update = (**state.snapshot.as_ref().expect("snapshot")).clone();
+    update.revision = 2;
+    let mut updated_surface = surface();
+    updated_surface.projection_revision = 2;
+    state.set_snapshot(Box::new(update));
+    state.set_pane_surface(updated_surface);
+    state.compose(106, 20).expect("same-shape update");
+    assert_eq!(state.tab_scroll, 2);
 }
 
 #[test]

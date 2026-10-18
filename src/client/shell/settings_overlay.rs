@@ -197,6 +197,37 @@ pub(super) fn render_settings_overlay(
         ClientSettingsSection::Integrations => {
             render_integrations(buffer, content, settings, palette);
         }
+        ClientSettingsSection::Tabs => {
+            render_choice_section(
+                buffer,
+                content,
+                "tab list",
+                "show the tab list in the horizontal tab bar or in the left sidebar",
+                &["horizontal", "vertical"],
+                settings.selected,
+                palette,
+                &mut choice_hits,
+            );
+        }
+        ClientSettingsSection::Sidebar => {
+            render_choice_section(
+                buffer,
+                content,
+                "sidebar section order",
+                "stack spaces, tabs, and agents in the order you prefer",
+                &[
+                    "spaces · tabs · agents",
+                    "spaces · agents · tabs",
+                    "tabs · spaces · agents",
+                    "tabs · agents · spaces",
+                    "agents · spaces · tabs",
+                    "agents · tabs · spaces",
+                ],
+                settings.selected,
+                palette,
+                &mut choice_hits,
+            );
+        }
     }
 
     let installable = settings
@@ -283,9 +314,26 @@ fn render_choice_section(
         description,
         Style::default().fg(palette.overlay1).bg(palette.panel_bg),
     );
-    let row_gap = u16::from(choices.len() > 2);
-    for (index, choice) in choices.iter().enumerate() {
-        let y = area.y + 3 + index as u16 * (1 + row_gap);
+    let rows = area.height.saturating_sub(3);
+    let gap = u16::from(
+        choices.len() > 2 && (choices.len() as u16).saturating_mul(2).saturating_sub(1) <= rows,
+    );
+    let step = 1 + gap;
+    let visible = (if step == 1 {
+        rows
+    } else {
+        rows.saturating_add(1) / step
+    })
+    .min(choices.len() as u16) as usize;
+    let scroll = selected.saturating_sub(visible.saturating_sub(1));
+    for (visible_index, (index, choice)) in choices
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(visible)
+        .enumerate()
+    {
+        let y = area.y + 3 + visible_index as u16 * step;
         if y >= area.bottom() {
             break;
         }

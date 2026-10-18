@@ -352,6 +352,9 @@ fn selection_edge_drag_requests_scroll_and_timer_continues_it() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(snapshot()));
     let mut pane_surface = surface();
+    // Keep one row above the pane so a drag can leave its top edge.
+    pane_surface.panes[0].rect.y = 1;
+    pane_surface.panes[0].inner_rect.y = 1;
     pane_surface.panes[0].scroll = Some(crate::protocol::PaneSurfaceScrollMetrics {
         offset_from_bottom: 0,
         max_offset_from_bottom: 20,

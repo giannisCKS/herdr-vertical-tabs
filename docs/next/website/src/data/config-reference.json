@@ -1006,6 +1006,16 @@
           "description": "Hide the tab row when the workspace has one tab."
         },
         {
+          "key": "ui.tabs_orientation",
+          "type": "enum",
+          "default": "\"horizontal\"",
+          "description": "Where the tab list renders: the horizontal tab bar across the desktop, or a scrollable list in the left sidebar. In the sidebar its position follows sidebar_section_order, which defaults to spaces, tabs, agents.",
+          "values": [
+            "horizontal",
+            "vertical"
+          ]
+        },
+        {
           "key": "ui.tab_bar_position",
           "type": "enum",
           "default": "\"top\"",
@@ -1089,6 +1099,17 @@
           "type": "list of token rows",
           "default": "[[\"state_icon\", \"workspace\"], [\"branch\", \"git_status\"]]",
           "description": "Expanded Space sidebar layout. Entries may be token strings or inline { token, fg, bold, dim, rules } style tables. Text-valued built-ins and $name metadata tokens accept up to 16 ordered rules using equals, contains, starts_with, gt, or lt; the first match overrides specified styles. Text conditions optionally accept ignore_case for ASCII matching; numeric conditions require full finite numbers. state_icon and git_status accept fixed styles only. At most 16 rows and 16 tokens per row."
+        },
+        {
+          "key": "ui.sidebar_section_order",
+          "type": "array",
+          "default": "[\"spaces\", \"tabs\", \"agents\"]",
+          "description": "Top-to-bottom order of the sidebar sections. Any order of spaces, tabs, and agents, defaulting to spaces, tabs, agents. Ordering moves the sections only, so each keeps its size. Tabs appear in the sidebar only when tabs_orientation is vertical; with the horizontal tab bar the relative order of spaces and agents still applies.",
+          "values": [
+            "spaces",
+            "tabs",
+            "agents"
+          ]
         },
         {
           "key": "ui.accent",

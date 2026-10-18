@@ -239,6 +239,7 @@ pub(super) fn render_expanded(
     area: Rect,
     active_snapshot: Option<&ClientShellSnapshot>,
     config: &ClientShellConfig,
+    sections: &crate::ui::ExpandedSidebarSections,
     state: &mut ShellRenderState<'_>,
     hits: &mut ShellHitMap,
 ) {
@@ -249,10 +250,24 @@ pub(super) fn render_expanded(
     } else {
         Rect::new(area.right().saturating_sub(1), area.y, 1, area.height)
     };
-    let (workspace_area, detail_area) =
-        crate::ui::expanded_sidebar_sections(area, state.sidebar_section_split);
-    hits.sidebar_section_divider =
-        crate::ui::sidebar_section_divider_rect(area, state.sidebar_section_split);
+    let workspace_area = sections.primary;
+    let detail_area = sections.agents;
+    hits.sidebar_section_divider = sections.divider;
+    hits.sidebar_section_above = sections.divider_above;
+    if let Some(tabs_area) = sections.tabs {
+        if let Some(snapshot) = active_snapshot {
+            super::render::render_sidebar_tabs(
+                buffer,
+                tabs_area,
+                snapshot,
+                config,
+                state.tab_scroll,
+                state.reveal_focused_tab,
+                state.tab_drag_insert_index,
+                hits,
+            );
+        }
+    }
     put_text(
         buffer,
         workspace_area.x,

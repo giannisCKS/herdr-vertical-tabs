@@ -119,7 +119,9 @@ fn grouped_worktrees_render_parent_branch_and_indented_child() {
     });
     state.set_snapshot(Box::new(snapshot));
     state.set_pane_surface(surface());
-    let frame = state.compose(106, 20).expect("composed frame");
+    let frame = state
+        .compose(106, SIDEBAR_TEST_ROWS)
+        .expect("composed frame");
     let text = frame
         .cells
         .chunks(frame.width as usize)
@@ -145,7 +147,9 @@ fn grouped_worktrees_render_parent_branch_and_indented_child() {
     state.collapsed_groups.insert("repo".into());
     state.set_snapshot(Box::new(replacement));
     state.set_pane_surface(replacement_surface);
-    let collapsed = state.compose(106, 20).expect("collapsed worktree group");
+    let collapsed = state
+        .compose(106, SIDEBAR_TEST_ROWS)
+        .expect("collapsed worktree group");
     let parent = state.hits.workspaces[0].rect;
     let status_cell = usize::from(parent.y) * usize::from(collapsed.width)
         + usize::from(parent.x.saturating_add(1));
@@ -202,7 +206,7 @@ fn duplicate_repo_parents_remain_visible_and_focusable_when_collapsed() {
                 state.collapsed_groups.insert("repo".into());
             }
             let frame = state
-                .compose(106, 24)
+                .compose(106, SIDEBAR_TEST_ROWS)
                 .expect("duplicate repository parents");
             for workspace_id in ["ws_1", "ws_duplicate"] {
                 let hit = state
@@ -303,7 +307,9 @@ fn workspace_click_waits_for_release_and_drag_reorders_by_stable_id() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(projected));
     state.set_pane_surface(surface());
-    state.compose(106, 24).expect("three workspaces");
+    state
+        .compose(106, SIDEBAR_TEST_ROWS)
+        .expect("three workspaces");
     let first = state.hits.workspaces[0].rect;
     let third = state.hits.workspaces[2].rect;
 
@@ -328,7 +334,9 @@ fn workspace_click_waits_for_release_and_drag_reorders_by_stable_id() {
             target: Some((None, _)),
         }) if source_workspace_id == "ws_1"
     ));
-    let frame = state.compose(106, 24).expect("workspace drop indicator");
+    let frame = state
+        .compose(106, SIDEBAR_TEST_ROWS)
+        .expect("workspace drop indicator");
     assert!(frame
         .cells
         .chunks(frame.width as usize)
@@ -351,7 +359,9 @@ fn workspace_click_waits_for_release_and_drag_reorders_by_stable_id() {
             )
     ));
 
-    state.compose(106, 24).expect("workspaces after drag");
+    state
+        .compose(106, SIDEBAR_TEST_ROWS)
+        .expect("workspaces after drag");
     let second = state.hits.workspaces[1].rect;
     state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
@@ -396,7 +406,7 @@ fn duplicate_repo_parent_drag_does_not_target_its_own_move_block() {
     state.set_snapshot(Box::new(projected));
     state.set_pane_surface(surface());
     state
-        .compose(106, 24)
+        .compose(106, SIDEBAR_TEST_ROWS)
         .expect("separated repository parents");
     let source = state.hits.workspaces[0].rect;
     let target = state.hits.workspaces[2].rect;
@@ -458,7 +468,9 @@ fn workspace_drag_moves_parent_worktree_as_one_block_and_rejects_child() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(projected));
     state.set_pane_surface(surface());
-    state.compose(106, 24).expect("worktree workspaces");
+    state
+        .compose(106, SIDEBAR_TEST_ROWS)
+        .expect("worktree workspaces");
     assert!(state.hits.workspaces[1].indented);
     let parent = state.hits.workspaces[0].rect;
     let child = state.hits.workspaces[1].rect;
@@ -493,7 +505,9 @@ fn workspace_drag_moves_parent_worktree_as_one_block_and_rejects_child() {
             )
     ));
 
-    state.compose(106, 24).expect("worktree child");
+    state
+        .compose(106, SIDEBAR_TEST_ROWS)
+        .expect("worktree child");
     state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         column: child.x + 2,
@@ -519,7 +533,7 @@ fn workspace_drag_moves_parent_worktree_as_one_block_and_rejects_child() {
     state.set_snapshot(Box::new(projected));
     state.set_pane_surface(surface());
     state
-        .compose(106, 24)
+        .compose(106, SIDEBAR_TEST_ROWS)
         .expect("repository block with duplicate root");
     let duplicate = state.hits.workspaces[1].rect;
     let other = state.hits.workspaces[3].rect;
@@ -1188,7 +1202,9 @@ fn navigate_mode_selects_workspace_locally_then_focuses_by_stable_id() {
         state.navigate_workspace_id,
         state.navigation_target(&ClientEndpointId::Local, "ws_2")
     );
-    let frame = state.compose(106, 20).expect("navigate frame");
+    let frame = state
+        .compose(106, SIDEBAR_TEST_ROWS)
+        .expect("navigate frame");
     let text = frame
         .cells
         .chunks(frame.width as usize)
