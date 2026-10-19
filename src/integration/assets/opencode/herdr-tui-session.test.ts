@@ -243,19 +243,34 @@ function v2Api() {
     ["a", { id: "a" }],
     ["b", { id: "b" }],
     ["child", { id: "child", parentID: "a" }],
+    ["child2", { id: "child2", parentID: "a" }],
   ]);
   let route = { type: "session", sessionID: "a" };
   const listeners = new Set<(event: unknown) => void>();
   const permissions = new Map<string, Array<{ id: string }> | undefined>();
   const forms = new Map<string, Array<{ id: string }> | undefined>();
+  const statuses = new Map<string, string>();
   return {
     api: {
       ui: { router: { current: () => route } },
       data: {
         session: {
           get: (id: string) => sessions.get(id),
-          family: () => [...sessions.keys()],
-          status: () => "idle",
+          // Mirror the SDK: family returns the session's descendants, not every
+          // cached session.
+          family: (id: string) => {
+            const result: string[] = [];
+            for (const [memberID, session] of sessions) {
+              if (memberID === id) continue;
+              let cursor = session.parentID;
+              while (cursor) {
+                if (cursor === id) { result.push(memberID); break; }
+                cursor = sessions.get(cursor)?.parentID;
+              }
+            }
+            return result;
+          },
+          status: (id: string) => statuses.get(id) ?? "idle",
           permission: { list: (id: string) => permissions.get(id) },
           form: { list: (id: string) => forms.get(id) },
         },
@@ -274,6 +289,7 @@ function v2Api() {
     sessions,
     permissions,
     forms,
+    statuses,
   };
 }
 
@@ -698,6 +714,118 @@ test("V2 resends the latest state after a failed delivery", async () => {
   await new Promise((resolve) => setTimeout(resolve, 700));
   failConnections = false;
   await resend;
+  expect(states().at(-1)).toBe("idle");
+  dispose();
+});
+
+test("V2 keeps the pane working while any descendant runs", async () => {
+  const plugin = await loadPlugin();
+  const tui = v2Api();
+  const dispose = await plugin.setup(tui.api);
+  activeDisposers.push(dispose);
+  await flushReports();
+  requests.length = 0;
+  tui.emit("session.execution.started", { sessionID: "a" });
+  tui.emit("session.execution.started", { sessionID: "child" });
+  tui.emit("session.execution.started", { sessionID: "child2" });
+  await flushReports();
+  expect(states().at(-1)).toBe("working");
+  // The selected session finishing must not erase its running children.
+  tui.emit("session.execution.succeeded", { sessionID: "a" });
+  await flushReports();
+  expect(states().at(-1)).toBe("working");
+  // One child finishing must keep the pane working while the other still runs.
+  tui.emit("session.execution.succeeded", { sessionID: "child" });
+  await flushReports();
+  expect(states().at(-1)).toBe("working");
+  tui.emit("session.execution.succeeded", { sessionID: "child2" });
+  await flushReports();
+  expect(states().at(-1)).toBe("idle");
+  expect(requests.every((r) => requestParam(r, "agent_session_id") === "a")).toBe(true);
+  dispose();
+});
+
+test("V2 hydrates already-running descendants when the pane attaches", async () => {
+  const plugin = await loadPlugin();
+  const tui = v2Api();
+  tui.statuses.set("child", "running");
+  const dispose = await plugin.setup(tui.api);
+  activeDisposers.push(dispose);
+  await flushReports();
+  expect(states().at(-1)).toBe("working");
+  tui.emit("session.execution.succeeded", { sessionID: "child" });
+  await flushReports();
+  expect(states().at(-1)).toBe("idle");
+  dispose();
+});
+
+test("V2 does not block input when a descendant fails without a request", async () => {
+  const plugin = await loadPlugin();
+  const tui = v2Api();
+  const dispose = await plugin.setup(tui.api);
+  activeDisposers.push(dispose);
+  await flushReports();
+  requests.length = 0;
+  tui.emit("session.execution.started", { sessionID: "child" });
+  await flushReports();
+  expect(states().at(-1)).toBe("working");
+  tui.emit("session.execution.failed", { sessionID: "child" });
+  await flushReports();
+  expect(states().at(-1)).toBe("idle");
+  expect(states()).not.toContain("blocked");
+  dispose();
+});
+
+test("V2 keeps blocker priority over running descendants", async () => {
+  const plugin = await loadPlugin();
+  const tui = v2Api();
+  const dispose = await plugin.setup(tui.api);
+  activeDisposers.push(dispose);
+  await flushReports();
+  requests.length = 0;
+  tui.emit("session.execution.started", { sessionID: "child" });
+  tui.emit("permission.asked", { sessionID: "child", id: "permission-child" });
+  await flushReports();
+  expect(states().at(-1)).toBe("blocked");
+  tui.emit("permission.replied", { sessionID: "child", requestID: "permission-child" });
+  await flushReports();
+  expect(states().at(-1)).toBe("working");
+  dispose();
+});
+
+test("V2 selection switch stops counting the previous subtree's running children", async () => {
+  const plugin = await loadPlugin();
+  const tui = v2Api();
+  tui.statuses.set("child", "running");
+  const dispose = await plugin.setup(tui.api);
+  activeDisposers.push(dispose);
+  await flushReports();
+  expect(states().at(-1)).toBe("working");
+  tui.select("b");
+  // Selection is poll/event driven; a routed event triggers the resync.
+  tui.emit("session.updated", { sessionID: "b" });
+  await flushReports();
+  expect(states().at(-1)).toBe("idle");
+  requests.length = 0;
+  tui.emit("session.execution.started", { sessionID: "child" });
+  tui.emit("session.execution.started", { sessionID: "a" });
+  await flushReports();
+  expect(states()).not.toContain("working");
+  expect(requests.every((r) => requestParam(r, "agent_session_id") === "b")).toBe(true);
+  dispose();
+});
+
+test("V2 deleting a running descendant clears its working contribution", async () => {
+  const plugin = await loadPlugin();
+  const tui = v2Api();
+  tui.statuses.set("child", "running");
+  const dispose = await plugin.setup(tui.api);
+  activeDisposers.push(dispose);
+  await flushReports();
+  expect(states().at(-1)).toBe("working");
+  tui.sessions.delete("child");
+  tui.emit("session.deleted", { sessionID: "child" });
+  await flushReports();
   expect(states().at(-1)).toBe("idle");
   dispose();
 });

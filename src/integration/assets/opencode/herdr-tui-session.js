@@ -1,7 +1,7 @@
 // installed by herdr
 // managed by herdr; reinstalling or updating the integration overwrites this file.
 // HERDR_INTEGRATION_ID=opencode-tui
-// HERDR_INTEGRATION_VERSION=13
+// HERDR_INTEGRATION_VERSION=14
 
 import net from "node:net";
 
@@ -413,9 +413,12 @@ function setup(api) {
   let chain = Promise.resolve();
   let retryIndex = 0;
   let nextSelectionAt = 0;
-  let state = "idle";
+  let failed = false;
   let retryTimer;
   const sessions = new Map();
+  // Every session inside the selected root's subtree that is still running.
+  // The selected session owns the pane, so a descendant keeps it working.
+  const running = new Set();
   let blockers = new Map();
   // Event callbacks may precede cache updates. Retain each delta until the
   // cache reflects it, so late hydration cannot undo a reply or lose an ask.
@@ -435,6 +438,17 @@ function setup(api) {
   function current() {
     const route = api.ui.router.current();
     return route.type === "session" ? root(route.sessionID) : undefined;
+  }
+
+  // Seed the running set from the live status cache. A pane that attaches while
+  // descendants already run must start working instead of reporting idle.
+  function runningFor(id) {
+    const result = new Set();
+    if (!id) return result;
+    for (const member of [id, ...api.data.session.family(id)]) {
+      if (root(member) === id && api.data.session.status(member) === "running") result.add(member);
+    }
+    return result;
   }
 
   // Selection and lifecycle use one queue. Recheck attribution at dispatch,
@@ -462,8 +476,18 @@ function setup(api) {
     retryTimer.unref?.();
   }
 
+  // Blockers outrank everything. The selected session's own failed execution
+  // also blocks input. Any running session inside the selected subtree keeps the
+  // pane working, even after an individual child finishes.
+  function sessionState() {
+    if (blockers.size) return "blocked";
+    if (failed) return "blocked";
+    if (running.size) return "working";
+    return "idle";
+  }
+
   function publish() {
-    enqueue(blockers.size ? "blocked" : state);
+    enqueue(sessionState());
   }
 
   function changeBlocker(id, kind, requestID, present) {
@@ -516,9 +540,10 @@ function setup(api) {
       nextSelectionAt = 0;
       blockers.clear();
       blockerChanges.clear();
-      if (id) {
-        state = api.data.session.status(id) === "running" ? "working" : "idle";
-      }
+      failed = false;
+      running.clear();
+      // A selection can land on a subtree whose descendants already run.
+      if (id) for (const member of runningFor(id)) running.add(member);
     }
     if (!id) return;
     const blockersChanged = reconcileBlockers();
@@ -540,8 +565,10 @@ function setup(api) {
       sessions.set(data.sessionID, { id: data.sessionID, parentID: data.parentID });
     }
     if (event.type === "session.deleted") {
-      const affected = data.sessionID === selected || [...blockers.values()].includes(data.sessionID);
+      const affected = data.sessionID === selected || running.has(data.sessionID) ||
+        [...blockers.values()].includes(data.sessionID);
       sessions.delete(data.sessionID);
+      running.delete(data.sessionID);
       // Deletion is delivered after the cache can remove the session. Use
       // stored ownership rather than looking up the deleted child's ancestry.
       for (const [key, owner] of blockers) if (owner === data.sessionID) blockers.delete(key);
@@ -570,17 +597,19 @@ function setup(api) {
         changeBlocker(id, "form", data.id, false);
         break;
       case "session.execution.started":
-        if (id !== selected) return;
-        state = "working";
+        running.add(id);
+        if (id === selected) failed = false;
         break;
       case "session.execution.succeeded":
       case "session.execution.interrupted":
-        if (id !== selected) return;
-        state = "idle";
+        running.delete(id);
+        if (id === selected) failed = false;
         break;
       case "session.execution.failed":
-        if (id !== selected) return;
-        state = "blocked";
+        running.delete(id);
+        // Only the selected session blocks input. A descendant failure has no
+        // pending request, so it must not strand the pane on blocked.
+        if (id === selected) failed = true;
         break;
       default:
         return;
@@ -599,6 +628,7 @@ function setup(api) {
     unsubscribe();
     sessions.clear();
     blockers.clear();
+    running.clear();
     blockerChanges.clear();
   };
 }
