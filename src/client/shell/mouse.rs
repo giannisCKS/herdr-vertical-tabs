@@ -42,19 +42,39 @@ impl ClientShellState {
         }
     }
 
-    fn set_sidebar_section_from_row(&mut self, row: u16, outcome: &mut ClientShellInput) {
-        let divider = self.hits.sidebar_divider;
-        if divider.height == 0 {
+    /// Moves rows between the two sections that meet at `index`.
+    ///
+    /// The third section keeps its rows, so its far edge stays put. The drag
+    /// stops at the rows the layout can reproduce, and the two split
+    /// preferences are re-derived from the new rows.
+    fn set_sidebar_divider_from_row(
+        &mut self,
+        index: usize,
+        row: u16,
+        outcome: &mut ClientShellInput,
+    ) {
+        let Some(divider) = self.hits.sidebar_dividers.get(index).copied().flatten() else {
+            return;
+        };
+        let total = self.hits.sidebar_divider.height;
+        if total == 0 || divider.pair_rows == 0 {
             return;
         }
-        let above = row.saturating_sub(divider.y);
-        let ratio = self
-            .hits
-            .sidebar_section_above
-            .split_ratio(above, divider.height);
-        if (self.sidebar_section_split - ratio).abs() > f32::EPSILON {
-            self.sidebar_section_split = ratio;
+        let above_rows = row.saturating_sub(divider.top);
+        let (_, section_split, spaces_split) =
+            divider.drag_result(above_rows, total, self.sidebar_spaces_split);
+        let mut changed = false;
+        if (self.sidebar_section_split - section_split).abs() > f32::EPSILON {
+            self.sidebar_section_split = section_split;
             self.sidebar_section_split_manual = true;
+            changed = true;
+        }
+        if (self.sidebar_spaces_split - spaces_split).abs() > f32::EPSILON {
+            self.sidebar_spaces_split = spaces_split;
+            self.sidebar_spaces_split_manual = true;
+            changed = true;
+        }
+        if changed {
             outcome.repaint = true;
         }
     }
@@ -1053,8 +1073,8 @@ impl ClientShellState {
                     self.set_sidebar_width_from_column(mouse.column, outcome);
                     return;
                 }
-                Some(ClientChromeDrag::SidebarSection) => {
-                    self.set_sidebar_section_from_row(mouse.row, outcome);
+                Some(ClientChromeDrag::SidebarDivider(index)) => {
+                    self.set_sidebar_divider_from_row(*index, mouse.row, outcome);
                     return;
                 }
                 Some(ClientChromeDrag::WorkspaceScrollbar { grab_row_offset }) => {
@@ -1400,7 +1420,7 @@ impl ClientShellState {
                             );
                         }
                     }
-                    ClientChromeDrag::SidebarWidth | ClientChromeDrag::SidebarSection => {
+                    ClientChromeDrag::SidebarWidth | ClientChromeDrag::SidebarDivider(_) => {
                         self.persist_chrome_preferences(outcome);
                     }
                     ClientChromeDrag::WorkspaceScrollbar { .. }
@@ -2036,10 +2056,15 @@ impl ClientShellState {
                     }
                     return;
                 }
-                if super::contains(self.hits.sidebar_section_divider, point) {
-                    self.chrome_drag = Some(ClientChromeDrag::SidebarSection);
-                    self.set_sidebar_section_from_row(mouse.row, outcome);
-                    return;
+                for index in 0..self.hits.sidebar_dividers.len() {
+                    let Some(divider) = self.hits.sidebar_dividers[index] else {
+                        continue;
+                    };
+                    if super::contains(divider.row, point) {
+                        self.chrome_drag = Some(ClientChromeDrag::SidebarDivider(index));
+                        self.set_sidebar_divider_from_row(index, mouse.row, outcome);
+                        return;
+                    }
                 }
                 if super::contains(self.hits.workspace_scrollbar, point) {
                     if let Some(metrics) = self.hits.workspace_scroll_metrics {

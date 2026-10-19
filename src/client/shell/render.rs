@@ -246,6 +246,7 @@ pub(super) struct ShellRenderState<'a> {
     pub(super) reveal_focused_tab: &'a mut bool,
     pub(super) sidebar_collapsed: bool,
     pub(super) sidebar_section_split: f32,
+    pub(super) sidebar_spaces_split: f32,
     pub(super) tab_drag_insert_index: Option<usize>,
     pub(super) selected_workspace_id: Option<&'a WorkspaceNavigationTarget>,
     pub(super) reveal_navigation_workspace: &'a mut bool,
@@ -271,9 +272,10 @@ pub(super) fn render_shell(
         );
     }
     if layout.sidebar.width > 0 {
-        let sections = crate::ui::expanded_sidebar_tabs_sections(
+        let sections = crate::ui::expanded_sidebar_tabs_sections_split(
             layout.sidebar,
             state.sidebar_section_split,
+            state.sidebar_spaces_split,
             if layout.sidebar_tabs {
                 focused_tab_count(snapshot)
             } else {
@@ -342,7 +344,7 @@ pub(super) fn render_shell(
     }
     if !config.mouse_capture {
         hits.sidebar_divider = Rect::default();
-        hits.sidebar_section_divider = Rect::default();
+        hits.sidebar_dividers = [None, None];
         hits.workspace_scrollbar = Rect::default();
         hits.agent_scrollbar = Rect::default();
         hits.agent_sort_toggle = Rect::default();

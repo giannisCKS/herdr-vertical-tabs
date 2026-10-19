@@ -637,43 +637,6 @@ fn ordered_state(order: [crate::config::SidebarSectionConfig; 3]) -> ClientShell
     state
 }
 
-/// Press on the section divider and drag it `rows` rows down.
-/// Returns (split before, split after, row offset, sidebar height, row above kind).
-fn drag_sidebar_divider(
-    order: [crate::config::SidebarSectionConfig; 3],
-    rows: u16,
-) -> (f32, f32, u16, u16, crate::ui::SidebarSectionAbove) {
-    let mut state = ordered_state(order);
-    state.compose(106, 20).expect("ordered sidebar");
-    let before = state.sidebar_section_split;
-    let divider = state.hits.sidebar_section_divider;
-    assert!(!divider.is_empty(), "{order:?}: the divider row is visible");
-    let column = divider.x + 1;
-    let row = divider.y;
-    state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
-        kind: MouseEventKind::Down(MouseButton::Left),
-        column,
-        row,
-        modifiers: KeyModifiers::empty(),
-    })]);
-    let dragged = state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
-        kind: MouseEventKind::Drag(MouseButton::Left),
-        column,
-        row: row + rows,
-        modifiers: KeyModifiers::empty(),
-    })]);
-    assert!(dragged.repaint, "{order:?}: the drag resizes the sections");
-    let sheet = state.hits.sidebar_divider;
-    let above = row + rows - sheet.y;
-    (
-        before,
-        state.sidebar_section_split,
-        above,
-        sheet.height,
-        state.hits.sidebar_section_above,
-    )
-}
-
 #[test]
 fn default_settings_keep_the_horizontal_strip_and_the_spaces_then_agents_sidebar() {
     let mut projected = snapshot();
@@ -698,17 +661,13 @@ fn default_settings_keep_the_horizontal_strip_and_the_spaces_then_agents_sidebar
         state.hits.agent_body.y > state.hits.workspaces[0].rect.y,
         "agents stay below the spaces list"
     );
-    assert_eq!(
-        state.hits.sidebar_section_above,
-        crate::ui::SidebarSectionAbove::Group
-    );
     let sections = crate::ui::expanded_sidebar_tabs_sections(
         layout.sidebar,
         state.sidebar_section_split,
         0,
         default_order(),
     );
-    assert_eq!(state.hits.sidebar_section_divider, sections.divider);
+    assert_eq!(state.hits.sidebar_dividers, sections.dividers);
     assert_eq!(state.hits.agent_body.y, sections.agents.y + 3);
     assert_eq!(state.hits.new_workspace.y, sections.primary.bottom() - 1);
 }
@@ -780,14 +739,7 @@ fn sidebar_section_order_places_the_sections_and_keeps_the_named_heights() {
             sections.primary.bottom() - 1,
             "{order:?}: the spaces footer keeps its rows"
         );
-        assert_eq!(
-            state.hits.sidebar_section_divider, sections.divider,
-            "{order:?}"
-        );
-        assert_eq!(
-            state.hits.sidebar_section_above, sections.divider_above,
-            "{order:?}"
-        );
+        assert_eq!(state.hits.sidebar_dividers, sections.dividers, "{order:?}");
 
         // The section header row belongs to the block above the agent panel.
         assert_eq!(
@@ -798,44 +750,477 @@ fn sidebar_section_order_places_the_sections_and_keeps_the_named_heights() {
     }
 }
 
+/// Press the divider at `index` and drag it to `row`.
+fn drag_divider(state: &mut ClientShellState, index: usize, row: u16) -> ClientShellInput {
+    drag_divider_through(state, index, &[row])
+}
+
+/// Press the divider at `index`, then drag it to each row in `rows` without
+/// releasing: one gesture, so the bounds stay as they were on the press.
+fn drag_divider_through(
+    state: &mut ClientShellState,
+    index: usize,
+    rows: &[u16],
+) -> ClientShellInput {
+    let divider = state.hits.sidebar_dividers[index].expect("visible boundary");
+    let column = divider.row.x + 1;
+    let mut outcome = state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column,
+        row: divider.row.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    for row in rows {
+        outcome = state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column,
+            row: *row,
+            modifiers: KeyModifiers::empty(),
+        })]);
+    }
+    outcome
+}
+
+/// The spaces, tab, and agent rectangles the state's splits produce.
+fn section_rects(
+    state: &ClientShellState,
+    order: [crate::config::SidebarSectionConfig; 3],
+    rows: u16,
+) -> [Rect; 3] {
+    let layout = state.layout(106, rows);
+    let sections = crate::ui::expanded_sidebar_tabs_sections_split(
+        layout.sidebar,
+        state.sidebar_section_split,
+        state.sidebar_spaces_split,
+        3,
+        order,
+    );
+    [
+        sections.primary,
+        sections.tabs.unwrap_or_default(),
+        sections.agents,
+    ]
+}
+
+fn rect_index(section: crate::config::SidebarSectionConfig) -> usize {
+    match section {
+        crate::config::SidebarSectionConfig::Spaces => 0,
+        crate::config::SidebarSectionConfig::Tabs => 1,
+        crate::config::SidebarSectionConfig::Agents => 2,
+    }
+}
+
 #[test]
-fn sidebar_section_divider_drag_follows_the_visible_boundary() {
+fn dividers_match_the_rendered_sections_in_every_order() {
+    for order in crate::config::SIDEBAR_SECTION_ORDERS {
+        let mut state = ordered_state(order);
+        state.compose(106, 40).expect("ordered sidebar");
+        let layout = state.layout(106, 40);
+        let sections = crate::ui::expanded_sidebar_tabs_sections_split(
+            layout.sidebar,
+            state.sidebar_section_split,
+            state.sidebar_spaces_split,
+            3,
+            order,
+        );
+        assert_eq!(state.hits.sidebar_dividers, sections.dividers, "{order:?}");
+        assert_eq!(
+            state.hits.tabs_body.y,
+            sections.tabs.expect("tab list").y + 2,
+            "{order:?}"
+        );
+        assert_eq!(state.hits.agent_body.y, sections.agents.y + 3, "{order:?}");
+        assert_eq!(
+            state.hits.new_workspace.y,
+            sections.primary.bottom() - 1,
+            "{order:?}: the spaces footer keeps its rows"
+        );
+    }
+}
+
+#[test]
+fn every_divider_drag_moves_rows_only_between_its_two_sections() {
+    use crate::config::SidebarSectionConfig::Tabs;
+
+    const ROWS: u16 = 40;
+    for order in crate::config::SIDEBAR_SECTION_ORDERS {
+        let mut probe = ordered_state(order);
+        probe.compose(106, ROWS).expect("ordered sidebar");
+        let layout = probe.layout(106, ROWS);
+        let sections = crate::ui::expanded_sidebar_tabs_sections_split(
+            layout.sidebar,
+            probe.sidebar_section_split,
+            probe.sidebar_spaces_split,
+            3,
+            order,
+        );
+        for (index, divider) in sections.dividers.into_iter().enumerate() {
+            let Some(divider) = divider else {
+                continue;
+            };
+            for offset in [-2_i32, 2] {
+                let target = divider
+                    .row
+                    .y
+                    .saturating_add_signed(offset as i16)
+                    .clamp(divider.top + 1, divider.top + divider.pair_rows - 1);
+                let mut state = ordered_state(order);
+                state.compose(106, ROWS).expect("ordered sidebar");
+                let before = section_rects(&state, order, ROWS);
+                let outcome = drag_divider(&mut state, index, target);
+                assert!(outcome.repaint, "{order:?} divider {index}: repaint");
+                assert!(!outcome.resize, "{order:?} divider {index}: no pane resize");
+                let after = section_rects(&state, order, ROWS);
+                let above = rect_index(divider.above);
+                let below = rect_index(divider.below);
+                assert_eq!(
+                    after[rect_index(divider.fixed)],
+                    before[rect_index(divider.fixed)],
+                    "{order:?} divider {index}: the third section keeps its rectangle"
+                );
+                assert_eq!(
+                    after[above].height + after[below].height,
+                    before[above].height + before[below].height,
+                    "{order:?} divider {index}: the pair keeps its rows"
+                );
+                if offset > 0 {
+                    assert!(
+                        after[above].height > before[above].height,
+                        "{order:?} divider {index}: dragging down grows the section above"
+                    );
+                } else {
+                    assert!(
+                        after[above].height < before[above].height,
+                        "{order:?} divider {index}: dragging up shrinks the section above"
+                    );
+                }
+
+                // Everything the drag stores comes back out of the layout.
+                state.compose(106, ROWS).expect("sidebar after the drag");
+                let moved = state.hits.sidebar_dividers[index]
+                    .expect("visible boundary")
+                    .row
+                    .y;
+                assert!(
+                    (i32::from(moved) - i32::from(target)).abs() <= 1,
+                    "{order:?} divider {index}: the boundary follows the pointer, {moved} instead of {target}"
+                );
+                assert_eq!(
+                    section_rects(&state, order, ROWS),
+                    after,
+                    "{order:?} divider {index}: the layout keeps the drag geometry"
+                );
+                assert!(
+                    Tabs == divider.above
+                        || Tabs == divider.below
+                        || after[rect_index(Tabs)] == before[rect_index(Tabs)],
+                    "{order:?} divider {index}: the tab list keeps its rows"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn the_spaces_boundary_keeps_the_tab_list_still() {
     use crate::config::SidebarSectionConfig::{Agents, Spaces, Tabs};
-    use crate::ui::SidebarSectionAbove;
 
-    // Stock order: the agent panel sits below the group, so dragging down grows
-    // the whole spaces/tabs group.
-    let (before, after, above, height, kind) = drag_sidebar_divider(default_order(), 4);
-    assert_eq!(kind, SidebarSectionAbove::Group);
-    assert!((before - 0.5).abs() < 1e-6, "the split starts centered");
-    let expected = (f32::from(above) / f32::from(height)).clamp(0.1, 0.9);
-    assert!(
-        (after - expected).abs() < 1e-6,
-        "dragging down grows the group: {after} vs {expected}"
+    // Reported case: moving the spaces/agents divider must not move the tab
+    // list, wherever the three sections are placed.
+    let spaces_first = [Spaces, Agents, Tabs];
+    let mut state = ordered_state(spaces_first);
+    state.compose(106, 40).expect("spaces first");
+    let before = section_rects(&state, spaces_first, 40);
+    let divider = state.hits.sidebar_dividers[0].expect("spaces/agents boundary");
+    assert_eq!(
+        (divider.above, divider.below, divider.fixed),
+        (Spaces, Agents, Tabs)
     );
-    assert!(after > before);
+    let outcome = drag_divider(&mut state, 0, divider.row.y - 4);
+    assert!(outcome.repaint, "the drag repaints the sidebar");
+    assert!(!outcome.resize, "the sections do not resize the panes");
+    let after = section_rects(&state, spaces_first, 40);
+    assert!(
+        after[rect_index(Spaces)].height < before[rect_index(Spaces)].height,
+        "the spaces list gives up the rows"
+    );
+    assert!(
+        after[rect_index(Agents)].height > before[rect_index(Agents)].height,
+        "the agent panel takes the rows"
+    );
+    assert_eq!(
+        after[rect_index(Tabs)],
+        before[rect_index(Tabs)],
+        "the tab list keeps its rows and its row"
+    );
 
-    // Agents first: the group fills the rows below the divider, so dragging
-    // down shrinks it.
-    let (before, after, above, height, kind) = drag_sidebar_divider([Agents, Spaces, Tabs], 4);
-    assert_eq!(kind, SidebarSectionAbove::Agents);
-    let expected = (f32::from(height - above) / f32::from(height)).clamp(0.1, 0.9);
-    assert!(
-        (after - expected).abs() < 1e-6,
-        "with agents on top the group is below the divider: {after} vs {expected}"
+    let agents_first = [Agents, Spaces, Tabs];
+    let mut state = ordered_state(agents_first);
+    state.compose(106, 40).expect("agents first");
+    let before = section_rects(&state, agents_first, 40);
+    let divider = state.hits.sidebar_dividers[0].expect("agents/spaces boundary");
+    assert_eq!(
+        (divider.above, divider.below, divider.fixed),
+        (Agents, Spaces, Tabs)
     );
-    assert!(after < before);
+    drag_divider(&mut state, 0, divider.row.y + 3);
+    let after = section_rects(&state, agents_first, 40);
+    assert!(
+        after[rect_index(Agents)].height > before[rect_index(Agents)].height,
+        "the agent panel above the divider grows"
+    );
+    assert!(
+        after[rect_index(Spaces)].height < before[rect_index(Spaces)].height,
+        "the spaces list gives up the rows"
+    );
+    assert_eq!(
+        after[rect_index(Tabs)],
+        before[rect_index(Tabs)],
+        "the tab list keeps its rows and its row"
+    );
+}
 
-    // A half boundary: the tab list sits above the divider, so the group grows
-    // twice as fast as the pointer moves.
-    let (before, after, above, height, kind) = drag_sidebar_divider([Tabs, Agents, Spaces], 4);
-    assert_eq!(kind, SidebarSectionAbove::GroupHalf);
-    let expected = ((2.0 * f32::from(above)) / f32::from(height)).clamp(0.1, 0.9);
-    assert!(
-        (after - expected).abs() < 1e-6,
-        "a half boundary scales the group share: {after} vs {expected}"
+#[test]
+fn extreme_drags_stop_at_the_layout_minimums_without_drifting() {
+    use crate::config::SidebarSectionConfig::{Agents, Spaces, Tabs};
+
+    // Reported case: 40 rows, even splits, the tabs between the spaces and the
+    // agents, and the tabs/agents boundary dragged far past the bottom.
+    let order = [Spaces, Tabs, Agents];
+    let mut state = ordered_state(order);
+    state.compose(106, 40).expect("ordered sidebar");
+    let before = section_rects(&state, order, 40);
+    assert_eq!((before[0].height, before[1].height), (10, 10));
+    let divider = state.hits.sidebar_dividers[1].expect("tabs/agents boundary");
+    assert_eq!(
+        (divider.above, divider.below, divider.fixed),
+        (Tabs, Agents, Spaces)
     );
-    assert!(after > before);
+
+    let outcome = drag_divider(&mut state, 1, 39);
+    assert!(outcome.repaint, "the drag repaints the sidebar");
+    assert!(!outcome.resize, "the drag does not resize the panes");
+    let after = section_rects(&state, order, 40);
+    assert_eq!(after[0].height, 10, "the spaces keep their share");
+    assert_eq!(
+        after[0], before[0],
+        "the spaces keep their rows and their row"
+    );
+    assert_eq!(
+        after[2].height, 4,
+        "the agent panel stops at the lower minimum"
+    );
+    assert_eq!(
+        after[1].height + after[2].height,
+        before[1].height + before[2].height,
+        "the pair keeps its rows"
+    );
+    assert_eq!(after.iter().map(|rect| rect.height).sum::<u16>(), 40);
+    state.compose(106, 40).expect("sidebar after the drag");
+    let boundary = state.hits.sidebar_dividers[1].expect("boundary").row.y;
+    assert!(
+        boundary < 39,
+        "the boundary stops before the pointer: {boundary}"
+    );
+    assert_eq!(boundary, after[1].bottom(), "the boundary tracks its rows");
+
+    // Repeating the extreme cannot drift, and one gesture can come back.
+    let clamped = after;
+    drag_divider(&mut state, 1, 39);
+    state
+        .compose(106, 40)
+        .expect("sidebar after the repeated drag");
+    assert_eq!(
+        section_rects(&state, order, 40),
+        clamped,
+        "the same extreme does not drift"
+    );
+
+    let mut state = ordered_state(order);
+    state.compose(106, 40).expect("ordered sidebar");
+    drag_divider_through(&mut state, 1, &[39, divider.row.y]);
+    state
+        .compose(106, 40)
+        .expect("sidebar after the reversed gesture");
+    assert_eq!(
+        section_rects(&state, order, 40),
+        before,
+        "dragging back inside the same gesture recovers the split"
+    );
+}
+
+#[test]
+fn extreme_drags_keep_the_tab_list_visible_in_a_short_sidebar() {
+    use crate::config::SidebarSectionConfig::{Agents, Spaces, Tabs};
+
+    // Reported case: 20 rows, where the tab list minimum is what stops the
+    // drag, and a vanished tab list would strand the gesture.
+    let order = [Spaces, Tabs, Agents];
+    for target in [7_u16, 6, 0] {
+        let mut state = ordered_state(order);
+        state.compose(106, 20).expect("ordered sidebar");
+        assert!(
+            state.hits.tabs_vertical,
+            "target {target}: the tab list renders"
+        );
+        let before = section_rects(&state, order, 20);
+        assert_eq!(
+            (before[0].height, before[1].height, before[2].height),
+            (5, 5, 10)
+        );
+        let divider = state.hits.sidebar_dividers[1].expect("tabs/agents boundary");
+        assert_eq!(
+            (divider.above, divider.below, divider.fixed),
+            (Tabs, Agents, Spaces)
+        );
+
+        drag_divider(&mut state, 1, target);
+        let after = section_rects(&state, order, 20);
+        assert_eq!(
+            after[0].height, 5,
+            "target {target}: the spaces keep their share"
+        );
+        assert!(
+            after[1].height >= 3,
+            "target {target}: the tab list keeps its rows"
+        );
+        assert_eq!(
+            after[1].height + after[2].height,
+            before[1].height + before[2].height,
+            "target {target}: the pair keeps its rows"
+        );
+        assert_eq!(after.iter().map(|rect| rect.height).sum::<u16>(), 20);
+        state.compose(106, 20).expect("sidebar after the drag");
+        assert!(
+            state.hits.tabs_vertical,
+            "target {target}: the tab list stays visible"
+        );
+        assert!(
+            state.hits.sidebar_dividers[1].is_some(),
+            "target {target}: the boundary stays where the drag can reach it"
+        );
+    }
+}
+
+#[test]
+fn extreme_drags_stop_at_the_minimums_in_every_order() {
+    use crate::config::SidebarSectionConfig::Tabs;
+
+    const ROWS: u16 = 40;
+    for order in crate::config::SIDEBAR_SECTION_ORDERS {
+        let mut probe = ordered_state(order);
+        probe.compose(106, ROWS).expect("ordered sidebar");
+        let layout = probe.layout(106, ROWS);
+        let sections = crate::ui::expanded_sidebar_tabs_sections_split(
+            layout.sidebar,
+            probe.sidebar_section_split,
+            probe.sidebar_spaces_split,
+            3,
+            order,
+        );
+        for (index, divider) in sections.dividers.into_iter().enumerate() {
+            let Some(divider) = divider else {
+                continue;
+            };
+            for target in [0_u16, ROWS - 1, ROWS] {
+                let mut state = ordered_state(order);
+                state.compose(106, ROWS).expect("ordered sidebar");
+                let before = section_rects(&state, order, ROWS);
+                let outcome = drag_divider(&mut state, index, target);
+                assert!(
+                    outcome.repaint,
+                    "{order:?} divider {index} -> {target}: repaint"
+                );
+                assert!(
+                    !outcome.resize,
+                    "{order:?} divider {index} -> {target}: no pane resize"
+                );
+                let after = section_rects(&state, order, ROWS);
+                assert_eq!(
+                    after[rect_index(divider.fixed)],
+                    before[rect_index(divider.fixed)],
+                    "{order:?} divider {index} -> {target}: the third section keeps its rectangle"
+                );
+                assert_eq!(
+                    after[rect_index(divider.above)].height
+                        + after[rect_index(divider.below)].height,
+                    divider.pair_rows,
+                    "{order:?} divider {index} -> {target}: the pair keeps its rows"
+                );
+                assert_eq!(
+                    after.iter().map(|rect| rect.height).sum::<u16>(),
+                    ROWS,
+                    "{order:?} divider {index} -> {target}: every row stays with a section"
+                );
+                for rect in after {
+                    assert!(
+                        rect.height == 0 || rect.height >= 3,
+                        "{order:?} divider {index} -> {target}: the sidebar keeps its minimums"
+                    );
+                }
+                assert_eq!(
+                    after[rect_index(Tabs)].height > 0,
+                    before[rect_index(Tabs)].height > 0,
+                    "{order:?} divider {index} -> {target}: the tab list keeps its place"
+                );
+
+                let clamped = after;
+                drag_divider(&mut state, index, target);
+                assert_eq!(
+                    section_rects(&state, order, ROWS),
+                    clamped,
+                    "{order:?} divider {index} -> {target}: the extreme does not drift"
+                );
+
+                let mut reverse = ordered_state(order);
+                reverse.compose(106, ROWS).expect("ordered sidebar");
+                drag_divider_through(&mut reverse, index, &[target, divider.row.y]);
+                assert_eq!(
+                    section_rects(&reverse, order, ROWS),
+                    before,
+                    "{order:?} divider {index} -> {target}: the gesture comes back"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn the_spaces_split_survives_a_reload() {
+    let mut state = ordered_state(default_order());
+    state.compose(106, 40).expect("ordered sidebar");
+    let divider = state.hits.sidebar_dividers[0].expect("spaces/tabs boundary");
+    assert_eq!(
+        (divider.above, divider.below),
+        (
+            crate::config::SidebarSectionConfig::Spaces,
+            crate::config::SidebarSectionConfig::Tabs
+        )
+    );
+    drag_divider(&mut state, 0, divider.row.y + 3);
+    assert!(state.sidebar_spaces_split > 0.5, "the spaces list grows");
+    assert!(state.sidebar_spaces_split_manual);
+    let stored = state.sidebar_spaces_split;
+    let before = section_rects(&state, default_order(), 40);
+
+    let mut reloaded = ordered_state(default_order());
+    reloaded.sidebar_spaces_split = stored;
+    reloaded.sidebar_spaces_split_manual = true;
+    reloaded.compose(106, 40).expect("reloaded sidebar");
+    assert_eq!(section_rects(&reloaded, default_order(), 40), before);
+
+    // A drag that stopped at a minimum stores rows it can reproduce as well.
+    let mut clamped_state = ordered_state(default_order());
+    clamped_state.compose(106, 40).expect("ordered sidebar");
+    drag_divider(&mut clamped_state, 1, 39);
+    let clamped = section_rects(&clamped_state, default_order(), 40);
+    let mut reloaded = ordered_state(default_order());
+    reloaded.sidebar_section_split = clamped_state.sidebar_section_split;
+    reloaded.sidebar_section_split_manual = true;
+    reloaded.sidebar_spaces_split = clamped_state.sidebar_spaces_split;
+    reloaded.sidebar_spaces_split_manual = true;
+    reloaded.compose(106, 40).expect("reloaded sidebar");
+    assert_eq!(section_rects(&reloaded, default_order(), 40), clamped);
 }
 
 #[test]
@@ -881,14 +1266,14 @@ fn horizontal_orientation_keeps_the_strip_and_orders_spaces_and_agents_only() {
         sections.primary.bottom() - 1,
         "the spaces footer follows its block"
     );
-    assert_eq!(state.hits.sidebar_section_divider, sections.divider);
+    assert_eq!(state.hits.sidebar_dividers, sections.dividers);
     assert_eq!(
-        state.hits.sidebar_section_divider.y, sections.primary.y,
+        state.hits.sidebar_dividers[0]
+            .expect("agents/spaces boundary")
+            .row
+            .y,
+        sections.primary.y,
         "the drag row sits above the spaces list"
-    );
-    assert_eq!(
-        state.hits.sidebar_section_above,
-        crate::ui::SidebarSectionAbove::Agents
     );
 
     // Tabs first is the same as spaces first while the strip owns the tabs.
@@ -900,8 +1285,12 @@ fn horizontal_orientation_keeps_the_strip_and_orders_spaces_and_agents_only() {
     state.compose(106, 20).expect("tabs-first strip sidebar");
     assert!(!state.layout(106, 20).sidebar_tabs);
     assert_eq!(
-        state.hits.sidebar_section_above,
-        crate::ui::SidebarSectionAbove::Group
+        state
+            .hits
+            .sidebar_dividers
+            .map(|divider| divider.map(|divider| (divider.above, divider.below))),
+        [Some((Spaces, Agents)), None],
+        "without vertical tabs only spaces and agents stay neighbours"
     );
 }
 

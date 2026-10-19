@@ -1,5 +1,5 @@
 use super::*;
-use crate::ui::SidebarSectionAbove;
+use crate::ui::SidebarDivider;
 
 pub(super) const MIN_TAB_WIDTH: u16 = 8;
 pub(super) const NEW_TAB_WIDTH: u16 = 3;
@@ -111,8 +111,9 @@ pub(super) struct ShellHitMap {
     pub(super) agent_max_scroll: usize,
     pub(super) agent_sort_toggle: Rect,
     pub(super) sidebar_divider: Rect,
-    pub(super) sidebar_section_divider: Rect,
-    pub(super) sidebar_section_above: SidebarSectionAbove,
+    /// Draggable boundaries between neighbouring sidebar sections, top to
+    /// bottom.
+    pub(super) sidebar_dividers: [Option<SidebarDivider>; 2],
     pub(super) sidebar_toggle: Rect,
     pub(super) new_workspace: Rect,
     pub(super) new_tab: Rect,
@@ -199,7 +200,8 @@ pub(super) struct ClientTabPress {
 
 pub(super) enum ClientChromeDrag {
     SidebarWidth,
-    SidebarSection,
+    /// One of the sidebar section boundaries, by index.
+    SidebarDivider(usize),
     WorkspaceScrollbar {
         grab_row_offset: u16,
     },
@@ -895,6 +897,8 @@ pub(crate) struct ClientShellState {
     pub(super) sidebar_width_manual: bool,
     pub(super) sidebar_section_split: f32,
     pub(super) sidebar_section_split_manual: bool,
+    pub(super) sidebar_spaces_split: f32,
+    pub(super) sidebar_spaces_split_manual: bool,
     pub(super) agent_panel_sort_manual: bool,
     pub(super) last_sidebar_divider_click: Option<std::time::Instant>,
     pub(super) chrome_drag: Option<ClientChromeDrag>,
@@ -1036,6 +1040,11 @@ impl ClientShellState {
             .filter(|split| split.is_finite())
             .map(|split| split.clamp(0.1, 0.9))
             .unwrap_or(0.5);
+        let sidebar_spaces_split = preferences
+            .sidebar_spaces_split
+            .filter(|split| split.is_finite())
+            .map(|split| split.clamp(0.1, 0.9))
+            .unwrap_or(0.5);
         if let Some(sort) = preferences.agent_panel_sort {
             config.agent_panel_sort = sort;
         }
@@ -1069,6 +1078,8 @@ impl ClientShellState {
             sidebar_width_manual: preferences.sidebar_width.is_some(),
             sidebar_section_split,
             sidebar_section_split_manual: preferences.sidebar_section_split.is_some(),
+            sidebar_spaces_split,
+            sidebar_spaces_split_manual: preferences.sidebar_spaces_split.is_some(),
             agent_panel_sort_manual: preferences.agent_panel_sort.is_some(),
             last_sidebar_divider_click: None,
             chrome_drag: None,

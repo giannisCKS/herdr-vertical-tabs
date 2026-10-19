@@ -9,6 +9,7 @@ The upstream license and attribution remain unchanged.
 - Choose horizontal tabs (the default) or vertical tabs in Settings.
 - Show the active space's tabs in a separate sidebar section in vertical mode.
 - Scroll Spaces, Tabs, and Agents independently.
+- Drag any divider between two neighbouring sidebar sections to resize just those two.
 - Choose any of the six orders of Spaces, Tabs, and Agents in Settings.
 - Save the orientation and section order across restarts.
 

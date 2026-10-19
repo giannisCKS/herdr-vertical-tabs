@@ -280,7 +280,9 @@ fn client_owned_sidebar_dividers_resize_live() {
     assert!(recovered_text.contains(" spaces"));
     assert!(recovered_text.contains("LIVE"));
     assert!(!state.hits.panes.is_empty());
-    let section_divider = state.hits.sidebar_section_divider;
+    let section_divider = state.hits.sidebar_dividers[0]
+        .expect("spaces/agents boundary")
+        .row;
     state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         column: section_divider.x + 2,

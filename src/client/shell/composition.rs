@@ -68,6 +68,7 @@ impl ClientShellState {
             reveal_focused_tab: &mut self.reveal_focused_tab,
             sidebar_collapsed: false,
             sidebar_section_split: self.sidebar_section_split,
+            sidebar_spaces_split: self.sidebar_spaces_split,
             tab_drag_insert_index: None,
             selected_workspace_id: self
                 .navigate_workspace_id
@@ -79,9 +80,10 @@ impl ClientShellState {
             workspace_drop_indicator_row: None,
         };
         if let Some(snapshot) = local_snapshot {
-            let sections = crate::ui::expanded_sidebar_tabs_sections(
+            let sections = crate::ui::expanded_sidebar_tabs_sections_split(
                 sidebar,
                 self.sidebar_section_split,
+                self.sidebar_spaces_split,
                 if layout.sidebar_tabs {
                     render::focused_tab_count(snapshot)
                 } else {
@@ -99,9 +101,10 @@ impl ClientShellState {
                 &mut self.hits,
             );
         } else {
-            let sections = crate::ui::expanded_sidebar_tabs_sections(
+            let sections = crate::ui::expanded_sidebar_tabs_sections_split(
                 sidebar,
                 self.sidebar_section_split,
+                self.sidebar_spaces_split,
                 if layout.sidebar_tabs {
                     self.snapshot
                         .as_deref()
@@ -253,6 +256,7 @@ impl ClientShellState {
                 reveal_focused_tab: &mut self.reveal_focused_tab,
                 sidebar_collapsed: self.sidebar_collapsed,
                 sidebar_section_split: self.sidebar_section_split,
+                sidebar_spaces_split: self.sidebar_spaces_split,
                 tab_drag_insert_index,
                 selected_workspace_id: self
                     .navigate_workspace_id

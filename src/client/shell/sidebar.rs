@@ -214,8 +214,7 @@ pub(crate) fn render_sidebar(
     };
     let workspace_area = sections.primary;
     let detail_area = sections.agents;
-    hits.sidebar_section_divider = sections.divider;
-    hits.sidebar_section_above = sections.divider_above;
+    hits.sidebar_dividers = sections.dividers;
     if let Some(tabs_area) = sections.tabs {
         super::tabs::render_sidebar_tabs(
             buffer,

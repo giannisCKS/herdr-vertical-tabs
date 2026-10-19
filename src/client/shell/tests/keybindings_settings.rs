@@ -197,6 +197,8 @@ fn manual_client_chrome_preferences_round_trip_per_endpoint() {
     state.sidebar_width_manual = true;
     state.sidebar_section_split = 0.7;
     state.sidebar_section_split_manual = true;
+    state.sidebar_spaces_split = 0.4;
+    state.sidebar_spaces_split_manual = true;
     state.sidebar_collapsed = true;
     state.sidebar_collapsed_manual = true;
     state.collapsed_groups.insert("repo-two".into());
@@ -221,6 +223,8 @@ fn manual_client_chrome_preferences_round_trip_per_endpoint() {
     assert!(reloaded.sidebar_width_manual);
     assert_eq!(reloaded.sidebar_section_split, 0.7);
     assert!(reloaded.sidebar_section_split_manual);
+    assert_eq!(reloaded.sidebar_spaces_split, 0.4);
+    assert!(reloaded.sidebar_spaces_split_manual);
     assert!(reloaded.sidebar_collapsed);
     assert!(reloaded.sidebar_collapsed_manual);
     assert_eq!(

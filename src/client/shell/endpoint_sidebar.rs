@@ -252,8 +252,7 @@ pub(super) fn render_expanded(
     };
     let workspace_area = sections.primary;
     let detail_area = sections.agents;
-    hits.sidebar_section_divider = sections.divider;
-    hits.sidebar_section_above = sections.divider_above;
+    hits.sidebar_dividers = sections.dividers;
     if let Some(tabs_area) = sections.tabs {
         if let Some(snapshot) = active_snapshot {
             super::render::render_sidebar_tabs(

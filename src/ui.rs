@@ -33,9 +33,9 @@ pub(crate) use self::scrollbar::{
     scrollbar_thumb_grab_offset,
 };
 pub(crate) use self::sidebar::{
-    agent_panel_entries_from, expanded_sidebar_tabs_sections, resolved_token_spans,
-    sidebar_agent_rows, sidebar_space_rows, AgentPanelEntry, AgentTokenContext,
-    ExpandedSidebarSections, ResolvedToken, ResolvedTokenKind, SidebarSectionAbove,
+    agent_panel_entries_from, expanded_sidebar_tabs_sections, expanded_sidebar_tabs_sections_split,
+    resolved_token_spans, sidebar_agent_rows, sidebar_space_rows, AgentPanelEntry,
+    AgentTokenContext, ExpandedSidebarSections, ResolvedToken, ResolvedTokenKind, SidebarDivider,
     SpaceTokenContext, SIDEBAR_TABS_CHROME_ROWS,
 };
 use self::status::copy_feedback_rect;

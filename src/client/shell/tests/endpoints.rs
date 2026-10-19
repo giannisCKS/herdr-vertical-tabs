@@ -2943,14 +2943,7 @@ fn expanded_sidebar_follows_the_tab_list_settings_for_every_order() {
         assert_eq!(state.hits.tabs_body.y, tabs.y + 2, "{order:?}");
         assert_eq!(state.hits.tabs_body.bottom(), tabs.bottom(), "{order:?}");
         assert_eq!(state.hits.agent_body.y, sections.agents.y + 3, "{order:?}");
-        assert_eq!(
-            state.hits.sidebar_section_divider, sections.divider,
-            "{order:?}: the draggable row follows the visible boundary"
-        );
-        assert_eq!(
-            state.hits.sidebar_section_above, sections.divider_above,
-            "{order:?}"
-        );
+        assert_eq!(state.hits.sidebar_dividers, sections.dividers, "{order:?}");
         for machine in &state.hits.machines {
             assert!(
                 machine.rect.y >= sections.primary.y
@@ -2984,8 +2977,8 @@ fn expanded_sidebar_follows_the_tab_list_settings_for_every_order() {
             expanded_sidebar_tabs_sections(layout.sidebar, state.sidebar_section_split, 0, order);
         assert!(sections.tabs.is_none(), "{order:?}");
         assert_eq!(
-            state.hits.sidebar_section_divider, sections.divider,
-            "{order:?}: divider still matches the geometry"
+            state.hits.sidebar_dividers, sections.dividers,
+            "{order:?}: dividers still match the geometry"
         );
         let first_agent_row = state.hits.agent_body.y;
         let first_space_row = state.hits.machines[0].rect.y;
