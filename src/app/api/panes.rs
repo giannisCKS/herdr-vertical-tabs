@@ -24,11 +24,21 @@ use crate::layout::{find_in_direction, NavDirection, PaneId};
 
 use super::super::api_helpers::{
     detect_state_from_api, encode_api_keys, normalize_metadata_source, normalize_metadata_tokens,
-    normalize_metadata_ttl, normalize_reported_agent_label, MAX_METADATA_TOKEN_KEYS_PER_RESOURCE,
+    normalize_metadata_ttl, normalize_reported_agent_label, normalize_reserved_opencode_token,
+    MAX_METADATA_TOKEN_KEYS_PER_RESOURCE,
 };
 #[cfg(test)]
 use super::super::api_helpers::{METADATA_SOURCE_MAX_CHARS, METADATA_TTL_MAX_MS};
 use super::responses::{encode_error, encode_success};
+
+/// A reserved OpenCode token report that already passed validation.
+///
+/// The handler validates before sequence acceptance and only commits after the
+/// report is accepted, so an ignored (stale) report never mutates tokens.
+enum ReservedTokenPlan {
+    Tabs(crate::opencode_tabs::TabSnapshot),
+    Focus(crate::opencode_tabs::FocusRequest),
+}
 
 impl App {
     pub(super) fn handle_pane_split(&mut self, id: String, params: PaneSplitParams) -> String {
@@ -1717,10 +1727,31 @@ impl App {
             Ok(source) => source,
             Err(message) => return encode_error(id, "invalid_metadata_source", message),
         };
+        let reserved_request = match normalize_reserved_opencode_token(&params.tokens, &source) {
+            Ok(reserved) => reserved,
+            Err((code, message)) => return encode_error(id, code, message),
+        };
+        // A reserved opencode token is an opencode-lane claim: an arbitrary
+        // agent label on the same report is rejected instead of being
+        // authoritative for the lane.
+        if reserved_request.is_some() {
+            if let Some(agent_label) = agent_label.as_deref() {
+                if agent_label != crate::opencode_tabs::OPENCODE_AGENT {
+                    return encode_error(
+                        id,
+                        "invalid_metadata_request",
+                        format!(
+                            "reserved opencode tokens require the {} agent",
+                            crate::opencode_tabs::OPENCODE_AGENT
+                        ),
+                    );
+                }
+            }
+        }
         let raw_title_set = params.title.is_some();
         let raw_display_agent_set = params.display_agent.is_some();
         let raw_state_labels_set = !params.state_labels.is_empty();
-        let tokens = if params.tokens.is_empty() {
+        let tokens = if reserved_request.is_some() || params.tokens.is_empty() {
             None
         } else {
             match normalize_metadata_tokens(params.tokens) {
@@ -1765,6 +1796,7 @@ impl App {
             && display_agent.is_none()
             && state_labels.is_empty()
             && tokens.is_none()
+            && reserved_request.is_none()
             && !params.clear_title
             && !params.clear_display_agent
             && !params.clear_state_labels
@@ -1793,6 +1825,28 @@ impl App {
         let Some(terminal) = self.state.terminals.get_mut(&terminal_id) else {
             return pane_not_found(id, &params.pane_id);
         };
+        // Reserved OpenCode tokens describe a live OpenCode process. When the
+        // pane has process-exit evidence, drop them now and ignore the report,
+        // matching how other metadata reports from an exited process are
+        // handled below.
+        let reserved_target_left_process = reserved_request.as_ref().is_some_and(|reserved| {
+            crate::opencode_tabs::source_for_token(reserved.key).is_some_and(|reserved_source| {
+                terminal.metadata_report_blocked_by_process_exit(
+                    reserved_source,
+                    Some(crate::opencode_tabs::OPENCODE_AGENT),
+                    None,
+                )
+            })
+        });
+        if reserved_target_left_process {
+            let cleared = terminal.clear_opencode_reserved_tokens();
+            if cleared {
+                terminal.revision = terminal.revision.saturating_add(1);
+                self.sync_agent_metadata_deadline();
+                self.emit_pane_updated(ws_idx, pane_id);
+            }
+            return encode_success(id, ResponseResult::Ok {});
+        }
         if terminal.metadata_report_blocked_by_process_exit(
             &source,
             agent_label.as_deref(),
@@ -1821,7 +1875,44 @@ impl App {
                 );
             }
         }
-        match terminal.accept_metadata_report(&source, params.seq, tokens.is_some(), metadata_agent)
+        if let Some(reserved) = reserved_request.as_ref() {
+            let patch = std::collections::HashMap::from([(
+                reserved.key.to_string(),
+                Some(reserved.value.clone()),
+            )]);
+            if terminal.metadata_tokens.key_count_after_patch(&patch)
+                > MAX_METADATA_TOKEN_KEYS_PER_RESOURCE
+            {
+                return encode_error(
+                    id,
+                    "metadata_token_limit",
+                    format!(
+                        "pane metadata may contain at most {MAX_METADATA_TOKEN_KEYS_PER_RESOURCE} tokens"
+                    ),
+                );
+            }
+        }
+        let reserved_plan = match reserved_request.as_ref() {
+            Some(reserved) => {
+                let now = std::time::Instant::now();
+                let validated = if reserved.key == crate::opencode_tabs::TABS_TOKEN {
+                    terminal
+                        .validate_opencode_tabs_token(&reserved.value)
+                        .map(ReservedTokenPlan::Tabs)
+                } else {
+                    terminal
+                        .validate_opencode_focus_token(&reserved.value, now)
+                        .map(ReservedTokenPlan::Focus)
+                };
+                match validated {
+                    Ok(plan) => Some((plan, now)),
+                    Err(error) => return encode_error(id, error.code, error.message),
+                }
+            }
+            None => None,
+        };
+        let includes_tokens = tokens.is_some() || reserved_request.is_some();
+        match terminal.accept_metadata_report(&source, params.seq, includes_tokens, metadata_agent)
         {
             Ok(true) => {}
             Ok(false) => return encode_success(id, ResponseResult::Ok {}),
@@ -1836,7 +1927,19 @@ impl App {
                 );
             }
         }
-        let token_changed = tokens.is_some_and(|tokens| {
+        let reserved_changed = match reserved_plan {
+            Some((ReservedTokenPlan::Tabs(snapshot), now)) => {
+                terminal.commit_opencode_tabs_snapshot(snapshot, now)
+            }
+            Some((ReservedTokenPlan::Focus(request), now)) => {
+                terminal.commit_opencode_focus_request(request, now)
+            }
+            None => false,
+        };
+        if reserved_changed {
+            terminal.revision = terminal.revision.saturating_add(1);
+        }
+        let mut token_changed = tokens.is_some_and(|tokens| {
             let changed = terminal
                 .metadata_tokens
                 .patch(tokens, ttl, std::time::Instant::now());
@@ -1845,6 +1948,7 @@ impl App {
             }
             changed
         });
+        token_changed |= reserved_changed;
 
         if presentation_requested {
             self.handle_internal_event(crate::events::AppEvent::HookMetadataReported {
@@ -4686,5 +4790,463 @@ mod tests {
 
             assert_eq!(metadata_error_code(&response), "invalid_metadata_ttl");
         }
+    }
+
+    const OPENCODE_TABS_OWNER: &str = "0123456789abcdef0123456789abcdef";
+    const OPENCODE_TABS_OTHER_OWNER: &str = "ffffffffffffffffffffffffffffffff";
+
+    fn opencode_tabs_value(owner: &str, tabs: &str) -> String {
+        format!(r#"{{"v":1,"owner":"{owner}","tabs":[{tabs}]}}"#)
+    }
+
+    fn opencode_focus_value(owner: &str, session: &str) -> String {
+        format!(
+            r#"{{"v":1,"owner":"{owner}","sessionID":"{session}","requestID":"{}"}}"#,
+            "a".repeat(32)
+        )
+    }
+
+    fn opencode_tabs_params(pane_id: String, value: String) -> PaneReportMetadataParams {
+        let mut params = metadata_params(pane_id);
+        params.title = None;
+        params.source = crate::opencode_tabs::TABS_SOURCE.into();
+        params.agent = Some(crate::opencode_tabs::OPENCODE_AGENT.into());
+        params.tokens = std::collections::HashMap::from([(
+            crate::opencode_tabs::TABS_TOKEN.to_string(),
+            Some(value),
+        )]);
+        params
+    }
+
+    fn opencode_focus_params(pane_id: String, value: String) -> PaneReportMetadataParams {
+        let mut params = metadata_params(pane_id);
+        params.title = None;
+        params.source = crate::opencode_tabs::FOCUS_SOURCE.into();
+        params.agent = Some(crate::opencode_tabs::OPENCODE_AGENT.into());
+        params.tokens = std::collections::HashMap::from([(
+            crate::opencode_tabs::FOCUS_TOKEN.to_string(),
+            Some(value),
+        )]);
+        params
+    }
+
+    fn pane_tokens(app: &mut App, pane_id: &str) -> std::collections::HashMap<String, String> {
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "get".into(),
+            method: crate::api::schema::Method::PaneGet(PaneTarget {
+                pane_id: pane_id.to_string(),
+            }),
+        });
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneInfo { pane } = success.result else {
+            panic!("expected pane info");
+        };
+        pane.tokens
+    }
+
+    #[test]
+    fn opencode_tabs_report_stores_full_snapshot_and_reads_back_through_pane_get() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let long_title = "t".repeat(100);
+        let value = opencode_tabs_value(
+            OPENCODE_TABS_OWNER,
+            &format!(
+                r#"{{"sessionID":"ses-1","title":"{long_title}","active":true,"busy":false,"attention":true,"unread":true}}"#
+            ),
+        );
+
+        let response = app.handle_pane_report_metadata(
+            "req".into(),
+            opencode_tabs_params(pane_id.clone(), value),
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.result, ResponseResult::Ok {});
+
+        let tokens = pane_tokens(&mut app, &pane_id);
+        let stored = &tokens[crate::opencode_tabs::TABS_TOKEN];
+        // The reserved token bypasses the generic 80-character value limit.
+        let snapshot = crate::opencode_tabs::parse_snapshot(stored).unwrap();
+        assert_eq!(snapshot.tabs[0].title, long_title);
+        assert!(snapshot.tabs[0].active);
+        assert!(snapshot.tabs[0].unread);
+        assert!(snapshot.expires_at_ms.is_some());
+    }
+
+    #[test]
+    fn opencode_tabs_report_rejects_mixed_wrong_source_and_null_values() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let value = opencode_tabs_value(OPENCODE_TABS_OWNER, r#"{"sessionID":"ses-1","title":""}"#);
+
+        let mut mixed = opencode_tabs_params(pane_id.clone(), value.clone());
+        mixed.tokens.insert("summary".into(), Some("sneaky".into()));
+        let response = app.handle_pane_report_metadata("req".into(), mixed);
+        assert_eq!(metadata_error_code(&response), "invalid_metadata_request");
+
+        let mut wrong_source = opencode_tabs_params(pane_id.clone(), value.clone());
+        wrong_source.source = "custom:pi".into();
+        let response = app.handle_pane_report_metadata("req".into(), wrong_source);
+        assert_eq!(metadata_error_code(&response), "invalid_metadata_source");
+
+        let mut wrong_agent = opencode_tabs_params(pane_id.clone(), value.clone());
+        wrong_agent.agent = Some("claude".into());
+        let response = app.handle_pane_report_metadata("req".into(), wrong_agent);
+        assert_eq!(metadata_error_code(&response), "invalid_metadata_request");
+
+        let mut null_value = opencode_tabs_params(pane_id.clone(), value);
+        null_value
+            .tokens
+            .insert(crate::opencode_tabs::TABS_TOKEN.to_string(), None);
+        let response = app.handle_pane_report_metadata("req".into(), null_value);
+        assert_eq!(metadata_error_code(&response), "invalid_metadata_request");
+
+        assert!(!pane_tokens(&mut app, &pane_id).contains_key(crate::opencode_tabs::TABS_TOKEN));
+    }
+
+    #[test]
+    fn opencode_tabs_report_rejects_invalid_schema() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let mut params = opencode_tabs_params(
+            pane_id.clone(),
+            opencode_tabs_value("NOT-HEX", r#"{"sessionID":"ses-1","title":""}"#),
+        );
+        let response = app.handle_pane_report_metadata("req".into(), params);
+        assert_eq!(metadata_error_code(&response), "invalid_opencode_tabs");
+
+        params = opencode_tabs_params(
+            pane_id.clone(),
+            opencode_tabs_value(
+                OPENCODE_TABS_OWNER,
+                r#"{"sessionID":"ses-1","title":"","active":true},{"sessionID":"ses-2","title":"","active":true}"#,
+            ),
+        );
+        let response = app.handle_pane_report_metadata("req".into(), params);
+        assert_eq!(metadata_error_code(&response), "invalid_opencode_tabs");
+
+        params = opencode_tabs_params(
+            pane_id,
+            opencode_tabs_value(OPENCODE_TABS_OWNER, r#"{"sessionID":"a b","title":""}"#),
+        );
+        let response = app.handle_pane_report_metadata("req".into(), params);
+        assert_eq!(metadata_error_code(&response), "invalid_opencode_tabs");
+    }
+
+    #[test]
+    fn opencode_tabs_focus_report_requires_live_matching_snapshot() {
+        let (mut app, pane_id) = app_with_test_workspace();
+
+        let response = app.handle_pane_report_metadata(
+            "req".into(),
+            opencode_focus_params(
+                pane_id.clone(),
+                opencode_focus_value(OPENCODE_TABS_OWNER, "ses-1"),
+            ),
+        );
+        assert_eq!(metadata_error_code(&response), "invalid_opencode_focus");
+
+        let response = app.handle_pane_report_metadata(
+            "req".into(),
+            opencode_tabs_params(
+                pane_id.clone(),
+                opencode_tabs_value(OPENCODE_TABS_OWNER, r#"{"sessionID":"ses-1","title":""}"#),
+            ),
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.result, ResponseResult::Ok {});
+
+        for value in [
+            opencode_focus_value(OPENCODE_TABS_OWNER, "ses-missing"),
+            opencode_focus_value(OPENCODE_TABS_OTHER_OWNER, "ses-1"),
+        ] {
+            let response = app.handle_pane_report_metadata(
+                "req".into(),
+                opencode_focus_params(pane_id.clone(), value),
+            );
+            assert_eq!(metadata_error_code(&response), "invalid_opencode_focus");
+        }
+
+        let response = app.handle_pane_report_metadata(
+            "req".into(),
+            opencode_focus_params(
+                pane_id.clone(),
+                opencode_focus_value(OPENCODE_TABS_OWNER, "ses-1"),
+            ),
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.result, ResponseResult::Ok {});
+        let stored = pane_tokens(&mut app, &pane_id)[crate::opencode_tabs::FOCUS_TOKEN].clone();
+        assert!(crate::opencode_tabs::parse_focus_request(&stored)
+            .unwrap()
+            .expires_at_ms
+            .is_some());
+    }
+
+    #[test]
+    fn opencode_tabs_reports_are_ignored_after_opencode_process_exit() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+
+        let response = app.handle_pane_report_metadata(
+            "req".into(),
+            opencode_tabs_params(
+                pane_id.clone(),
+                opencode_tabs_value(
+                    OPENCODE_TABS_OWNER,
+                    r#"{"sessionID":"ses-1","title":"Root"}"#,
+                ),
+            ),
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.result, ResponseResult::Ok {});
+
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state_with_visible_blocker(
+                Some(Agent::OpenCode),
+                AgentState::Idle,
+                false,
+                false,
+                true,
+            );
+
+        let response = app.handle_pane_report_metadata(
+            "req".into(),
+            opencode_focus_params(
+                pane_id.clone(),
+                opencode_focus_value(OPENCODE_TABS_OWNER, "ses-1"),
+            ),
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.result, ResponseResult::Ok {});
+
+        // A tabs report arriving after the exit observation is ignored too.
+        let mut late = opencode_tabs_params(
+            pane_id.clone(),
+            opencode_tabs_value(
+                OPENCODE_TABS_OWNER,
+                r#"{"sessionID":"ses-2","title":"Late"}"#,
+            ),
+        );
+        late.seq = Some(2);
+        let response = app.handle_pane_report_metadata("late".into(), late);
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.result, ResponseResult::Ok {});
+
+        let tokens = pane_tokens(&mut app, &pane_id);
+        assert!(!tokens.contains_key(crate::opencode_tabs::TABS_TOKEN));
+        assert!(!tokens.contains_key(crate::opencode_tabs::FOCUS_TOKEN));
+    }
+
+    #[test]
+    fn opencode_tabs_owner_change_replaces_tabs_and_clears_focus() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let report = |app: &mut App, value: String| {
+            app.handle_pane_report_metadata(
+                "req".into(),
+                opencode_tabs_params(pane_id.clone(), value),
+            )
+        };
+
+        let response = report(
+            &mut app,
+            opencode_tabs_value(OPENCODE_TABS_OWNER, r#"{"sessionID":"ses-1","title":""}"#),
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.result, ResponseResult::Ok {});
+
+        let response = app.handle_pane_report_metadata(
+            "req".into(),
+            opencode_focus_params(
+                pane_id.clone(),
+                opencode_focus_value(OPENCODE_TABS_OWNER, "ses-1"),
+            ),
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.result, ResponseResult::Ok {});
+
+        let response = report(
+            &mut app,
+            opencode_tabs_value(
+                OPENCODE_TABS_OTHER_OWNER,
+                r#"{"sessionID":"ses-2","title":""}"#,
+            ),
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.result, ResponseResult::Ok {});
+
+        let tokens = pane_tokens(&mut app, &pane_id);
+        assert!(!tokens.contains_key(crate::opencode_tabs::FOCUS_TOKEN));
+        let snapshot =
+            crate::opencode_tabs::parse_snapshot(&tokens[crate::opencode_tabs::TABS_TOKEN])
+                .unwrap();
+        assert_eq!(snapshot.owner, OPENCODE_TABS_OTHER_OWNER);
+        assert_eq!(snapshot.tabs[0].session_id, "ses-2");
+    }
+
+    #[test]
+    fn opencode_tabs_reports_leave_ordinary_metadata_tokens_alone() {
+        let (mut app, pane_id) = app_with_test_workspace();
+
+        let mut ordinary = metadata_params(pane_id.clone());
+        ordinary.title = None;
+        ordinary.tokens = std::collections::HashMap::from([(
+            "summary".to_string(),
+            Some("ordinary token".to_string()),
+        )]);
+        let response = app.handle_pane_report_metadata("req".into(), ordinary);
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.result, ResponseResult::Ok {});
+
+        let response = app.handle_pane_report_metadata(
+            "req".into(),
+            opencode_tabs_params(
+                pane_id.clone(),
+                opencode_tabs_value(OPENCODE_TABS_OWNER, r#"{"sessionID":"ses-1","title":""}"#),
+            ),
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.result, ResponseResult::Ok {});
+
+        let response = app.handle_pane_report_metadata(
+            "req".into(),
+            opencode_tabs_params(
+                pane_id.clone(),
+                opencode_tabs_value(OPENCODE_TABS_OWNER, ""),
+            ),
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.result, ResponseResult::Ok {});
+
+        let tokens = pane_tokens(&mut app, &pane_id);
+        assert_eq!(tokens["summary"], "ordinary token");
+        assert!(!tokens.contains_key(crate::opencode_tabs::TABS_TOKEN));
+    }
+
+    #[test]
+    fn opencode_tabs_stale_sequence_leaves_stored_snapshot_unchanged() {
+        let (mut app, pane_id) = app_with_test_workspace();
+
+        let mut accepted_tabs = opencode_tabs_params(
+            pane_id.clone(),
+            opencode_tabs_value(
+                OPENCODE_TABS_OWNER,
+                r#"{"sessionID":"ses-1","title":"one","active":true}"#,
+            ),
+        );
+        accepted_tabs.seq = Some(10);
+        let response = app.handle_pane_report_metadata("accepted".into(), accepted_tabs);
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.result, ResponseResult::Ok {});
+        let stored_tabs = pane_tokens(&mut app, &pane_id)[crate::opencode_tabs::TABS_TOKEN].clone();
+
+        // A stale report that would replace the owner and clear focus must not
+        // touch stored tokens: the sequence is rejected before any commit.
+        let mut stale_tabs = opencode_tabs_params(
+            pane_id.clone(),
+            opencode_tabs_value(
+                OPENCODE_TABS_OTHER_OWNER,
+                r#"{"sessionID":"ses-9","title":"nine","active":true}"#,
+            ),
+        );
+        stale_tabs.seq = Some(9);
+        let response = app.handle_pane_report_metadata("stale-tabs".into(), stale_tabs);
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.result, ResponseResult::Ok {});
+        let after_stale = pane_tokens(&mut app, &pane_id);
+        assert_eq!(
+            after_stale[crate::opencode_tabs::TABS_TOKEN],
+            stored_tabs,
+            "stale tabs report must leave the stored snapshot byte-identical"
+        );
+
+        let mut accepted_focus = opencode_focus_params(
+            pane_id.clone(),
+            opencode_focus_value(OPENCODE_TABS_OWNER, "ses-1"),
+        );
+        accepted_focus.seq = Some(10);
+        let response = app.handle_pane_report_metadata("accepted-focus".into(), accepted_focus);
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.result, ResponseResult::Ok {});
+        let stored_focus =
+            pane_tokens(&mut app, &pane_id)[crate::opencode_tabs::FOCUS_TOKEN].clone();
+
+        let mut stale_focus = opencode_focus_params(
+            pane_id.clone(),
+            format!(
+                r#"{{"v":1,"owner":"{OPENCODE_TABS_OWNER}","sessionID":"ses-1","requestID":"{}"}}"#,
+                "b".repeat(32)
+            ),
+        );
+        stale_focus.seq = Some(9);
+        let response = app.handle_pane_report_metadata("stale-focus".into(), stale_focus);
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.result, ResponseResult::Ok {});
+        let after_stale_focus = pane_tokens(&mut app, &pane_id);
+        assert_eq!(
+            after_stale_focus[crate::opencode_tabs::FOCUS_TOKEN],
+            stored_focus,
+            "stale focus report must leave the stored request byte-identical"
+        );
+        assert_eq!(
+            crate::opencode_tabs::parse_focus_request(&stored_focus)
+                .unwrap()
+                .request_id,
+            "a".repeat(32)
+        );
+    }
+
+    #[test]
+    fn opencode_tabs_sequence_limit_error_does_not_store_snapshot() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        {
+            let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+            for index in 0..crate::metadata_tokens::MAX_SEQUENCE_SOURCES {
+                assert_eq!(
+                    terminal.accept_metadata_report(
+                        &format!("source-{index}"),
+                        Some(1),
+                        true,
+                        None
+                    ),
+                    Ok(true)
+                );
+            }
+        }
+
+        // This report passes the freshness pre-check but the sequence store is
+        // full, so acceptance fails with an error. Validation must run first
+        // and commit only after acceptance, so no token may be stored.
+        let mut params = opencode_tabs_params(
+            pane_id.clone(),
+            opencode_tabs_value(
+                OPENCODE_TABS_OWNER,
+                r#"{"sessionID":"ses-1","title":"one","active":true}"#,
+            ),
+        );
+        params.seq = Some(1);
+        let response = app.handle_pane_report_metadata("limit".into(), params);
+        assert_eq!(
+            metadata_error_code(&response),
+            "metadata_sequence_source_limit"
+        );
+
+        let tokens = pane_tokens(&mut app, &pane_id);
+        assert!(!tokens.contains_key(crate::opencode_tabs::TABS_TOKEN));
+        assert!(!app.state.terminals[&terminal_id]
+            .metadata_tokens
+            .values()
+            .contains_key(crate::opencode_tabs::TABS_TOKEN));
     }
 }

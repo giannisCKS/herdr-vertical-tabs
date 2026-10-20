@@ -7,9 +7,10 @@ pub(super) fn render_collapsed(
     endpoints: &[ClientShellEndpoint],
     active_endpoint_id: &ClientEndpointId,
     config: &ClientShellConfig,
+    selection: Option<&super::agent_sidebar::AgentSelection>,
     hits: &mut ShellHitMap,
 ) {
-    let rows = agent_rows(endpoints, active_endpoint_id, config);
+    let rows = agent_rows(endpoints, active_endpoint_id, config, selection);
     for (index, row) in rows.into_iter().take(area.height as usize).enumerate() {
         let rect = Rect::new(area.x, area.y + index as u16, area.width, 1);
         if row.agent.focused {
@@ -38,7 +39,7 @@ pub(super) fn render_collapsed(
                 }),
         );
         hits.endpoint_agents
-            .push((rect, row.endpoint_id, row.agent.pane_id));
+            .push((rect, row.endpoint_id, row.agent.identity));
     }
 }
 
@@ -50,6 +51,7 @@ pub(super) fn render_expanded(
     active_endpoint_id: &ClientEndpointId,
     config: &ClientShellConfig,
     agent_scroll: &mut usize,
+    selection: Option<&super::agent_sidebar::AgentSelection>,
     hits: &mut ShellHitMap,
 ) {
     if !super::agent_sidebar::render_agent_panel_header(
@@ -61,7 +63,7 @@ pub(super) fn render_expanded(
     ) {
         return;
     }
-    let rows = agent_rows(endpoints, active_endpoint_id, config);
+    let rows = agent_rows(endpoints, active_endpoint_id, config, selection);
     super::agent_sidebar::render_agent_list(
         buffer,
         area,
@@ -82,7 +84,7 @@ pub(super) fn render_expanded(
                 );
             }
             hits.endpoint_agents
-                .push((rect, row.endpoint_id.clone(), row.agent.pane_id.clone()));
+                .push((rect, row.endpoint_id.clone(), row.agent.identity.clone()));
         },
     );
 }
@@ -91,16 +93,21 @@ impl ClientShellState {
     pub(super) fn reveal_endpoint_agent(
         &mut self,
         endpoint_id: &ClientEndpointId,
-        pane_id: &str,
+        identity: &super::agent_sidebar::AgentIdentity,
         body_height: u16,
     ) {
         if body_height == 0 {
             return;
         }
-        let rows = agent_rows(&self.endpoints, &self.active_endpoint_id, &self.config);
+        let rows = agent_rows(
+            &self.endpoints,
+            &self.active_endpoint_id,
+            &self.config,
+            None,
+        );
         let Some(target) = rows
             .iter()
-            .position(|row| &row.endpoint_id == endpoint_id && row.agent.pane_id == pane_id)
+            .position(|row| &row.endpoint_id == endpoint_id && &row.agent.identity == identity)
         else {
             return;
         };
@@ -133,45 +140,65 @@ fn agent_rows(
     endpoints: &[ClientShellEndpoint],
     active_endpoint_id: &ClientEndpointId,
     config: &ClientShellConfig,
+    selection: Option<&super::agent_sidebar::AgentSelection>,
 ) -> Vec<EndpointAgentRow> {
-    let mut rendered_rows = endpoints
-        .iter()
-        .filter_map(|endpoint| {
-            endpoint.snapshot.as_deref().map(|snapshot| {
-                snapshot
-                    .agents
-                    .iter()
-                    .filter_map(|agent| {
-                        super::agent_sidebar::agent_row(
-                            snapshot,
-                            &agent.pane_id,
-                            config,
-                            Some(&endpoint.label),
-                        )
-                    })
-                    .map(|agent| ((endpoint.endpoint_id.clone(), agent.pane_id.clone()), agent))
-                    .collect::<Vec<_>>()
-            })
-        })
-        .flatten()
-        .collect::<HashMap<_, _>>();
+    let mut rendered_rows = HashMap::new();
+    for endpoint in endpoints {
+        let Some(snapshot) = endpoint.snapshot.as_deref() else {
+            continue;
+        };
+        for agent in &snapshot.agents {
+            let rows = super::agent_sidebar::agent_rows_for_pane(
+                snapshot,
+                &agent.pane_id,
+                config,
+                Some(&endpoint.label),
+                &endpoint.endpoint_id.storage_key(),
+            );
+            if !rows.is_empty() {
+                rendered_rows.insert((endpoint.endpoint_id.clone(), agent.pane_id.clone()), rows);
+            }
+        }
+    }
 
-    super::aggregate_navigation::aggregate_agent_rows(
+    let mut rows: Vec<EndpointAgentRow> = super::aggregate_navigation::aggregate_agent_rows(
         endpoints,
         active_endpoint_id,
         config.agent_panel_sort,
     )
     .into_iter()
-    .filter_map(|row| {
+    .flat_map(|row| {
         let key = (row.endpoint.endpoint_id.clone(), row.agent.pane_id.clone());
-        let mut agent = rendered_rows.remove(&key)?;
-        agent.focused &= row.endpoint.endpoint_id == active_endpoint_id;
-        Some(EndpointAgentRow {
-            endpoint_id: row.endpoint.endpoint_id.clone(),
-            machine_label: row.endpoint.label.to_owned(),
-            stale: row.endpoint.stale(),
-            agent,
-        })
+        let Some(rows) = rendered_rows.remove(&key) else {
+            return Vec::new();
+        };
+        let active = row.endpoint.endpoint_id == active_endpoint_id;
+        let endpoint_id = row.endpoint.endpoint_id.clone();
+        let machine_label = row.endpoint.label.to_owned();
+        let stale = row.endpoint.stale();
+        rows.into_iter()
+            .map(|mut agent| {
+                agent.focused &= active;
+                EndpointAgentRow {
+                    endpoint_id: endpoint_id.clone(),
+                    machine_label: machine_label.clone(),
+                    stale,
+                    agent,
+                }
+            })
+            .collect()
     })
-    .collect()
+    .collect();
+    super::agent_sidebar::collapse_workspace_headers(&mut rows, |row| &mut row.agent);
+    if let Some(selection) = selection {
+        for row in &mut rows {
+            let endpoint_id = row.endpoint_id.clone();
+            super::agent_sidebar::apply_selection_intent(
+                std::slice::from_mut(&mut row.agent),
+                &endpoint_id,
+                Some(selection),
+            );
+        }
+    }
+    rows
 }

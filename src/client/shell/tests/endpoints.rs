@@ -421,7 +421,7 @@ fn agent_navigation_reveals_offscreen_targets() {
             .hits
             .endpoint_agents
             .iter()
-            .any(|(_, endpoint, pane)| { endpoint == &endpoint_id && pane == pane_id }));
+            .any(|(_, endpoint, pane)| { endpoint == &endpoint_id && pane.pane_id() == pane_id }));
 
         let mut outcome = ClientShellInput::default();
         assert!(state.handle_endpoint_navigation(action, &mut outcome));
@@ -435,7 +435,9 @@ fn agent_navigation_reveals_offscreen_targets() {
                 .hits
                 .endpoint_agents
                 .iter()
-                .any(|(_, endpoint, pane)| { endpoint == &endpoint_id && pane == pane_id }),
+                .any(|(_, endpoint, pane)| {
+                    endpoint == &endpoint_id && pane.pane_id() == pane_id
+                }),
             "{action:?} must reveal the selected agent"
         );
     }
@@ -495,7 +497,7 @@ fn agent_navigation_reveals_target_using_destination_sort() {
         .hits
         .endpoint_agents
         .iter()
-        .any(|(_, endpoint, pane)| { endpoint == &remote && pane == "pane_8" }));
+        .any(|(_, endpoint, pane)| { endpoint == &remote && pane.pane_id() == "pane_8" }));
 }
 
 #[test]
@@ -525,7 +527,7 @@ fn agent_navigation_reveal_is_cancelled_by_another_selection() {
 #[test]
 fn agent_navigation_keeps_scroll_when_target_is_visible() {
     let (mut state, _) = state_with_scrollable_agents();
-    let (_, endpoint_id, pane_id) = state.hits.endpoint_agents[1].clone();
+    let (_, endpoint_id, identity) = state.hits.endpoint_agents[1].clone();
     let targets = super::super::aggregate_navigation::online_agent_targets(
         &state.endpoints,
         &state.active_endpoint_id,
@@ -533,7 +535,7 @@ fn agent_navigation_keeps_scroll_when_target_is_visible() {
     );
     let index = targets
         .iter()
-        .position(|target| target.endpoint_id == endpoint_id && target.pane_id == pane_id)
+        .position(|target| target.endpoint_id == endpoint_id && target.identity == identity)
         .unwrap();
     let scroll = state.agent_scroll;
     assert!(state.handle_endpoint_navigation(
@@ -549,7 +551,7 @@ fn switching_machines_preserves_aggregate_agent_scroll_and_visible_rows() {
     let (mut state, remote) = state_with_scrollable_agents();
     for endpoint_id in [remote.clone(), ClientEndpointId::Local, remote] {
         let visible = state.hits.endpoint_agents.clone();
-        let (rect, _, pane_id) = visible
+        let (rect, _, identity) = visible
             .iter()
             .find(|(_, endpoint, _)| endpoint == &endpoint_id)
             .expect("destination agent remains visible");
@@ -564,7 +566,7 @@ fn switching_machines_preserves_aggregate_agent_scroll_and_visible_rows() {
             [ClientShellAction::ActivateEndpoint {
                 endpoint_id: target,
                 target: Some(ClientEndpointFocusTarget::Pane(target_pane)),
-            }] if target == &endpoint_id && target_pane == pane_id
+            }] if target == &endpoint_id && target_pane == identity.pane_id()
         ));
 
         state.workspace_scroll = 3;
@@ -593,7 +595,7 @@ fn local_agent_click_can_cancel_a_pending_remote_switch() {
             state.mark_endpoint_disconnected(&ClientEndpointId::Local);
         }
         state.compose(100, 28).unwrap();
-        let (rect, _, pane_id) = state
+        let (rect, _, identity) = state
             .hits
             .endpoint_agents
             .iter()
@@ -610,7 +612,7 @@ fn local_agent_click_can_cancel_a_pending_remote_switch() {
             matches!(outcome.actions.as_slice(), [ClientShellAction::ActivateEndpoint {
             endpoint_id: ClientEndpointId::Local,
             target: Some(ClientEndpointFocusTarget::Pane(target)),
-        }] if target == &pane_id)
+        }] if target == identity.pane_id())
         );
     }
 }

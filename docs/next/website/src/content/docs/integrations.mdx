@@ -203,6 +203,10 @@ Local V1 `opencode run` and `opencode --mini` retain their legacy server hooks; 
 
 The plugin reports lifecycle state and session identity while OpenCode runs inside a Herdr pane. After OpenCode emits a session-bearing event, Herdr can use the reported session id to resume the pane with `opencode --session <id>`. Native screen manifest detection remains available when the plugin is not installed.
 
+When OpenCode exposes its open root tabs, Herdr's agent sidebar shows one entry per tab instead of one entry for the pane. Each entry uses the tab's title and status: blocked when it needs attention, working while busy, otherwise idle. Selecting an entry focuses its pane and switches OpenCode to that tab. Entries follow OpenCode's tab order; subagent conversations do not become separate entries. Clients without the tab API keep one ordinary pane entry. This behavior belongs to Herdr's native sidebar and does not require Radar.
+
+The sidebar highlights a selected tab immediately while OpenCode confirms the switch. Rapid navigation uses that pending selection rather than an older snapshot. Pending selection expires after three seconds if the switch is not confirmed. Rapid tab selections are coalesced to the newest pending target. OpenCode focus calls run one at a time, and the integration refreshes the tab snapshot after each completed switch instead of waiting for its regular poll.
+
 ## Kilo Code CLI
 
 Install the Kilo Code CLI plugin:

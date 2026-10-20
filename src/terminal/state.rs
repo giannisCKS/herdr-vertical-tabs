@@ -452,6 +452,12 @@ impl TerminalState {
                     agent,
                     observed_at: now,
                 });
+                // OpenCode reserved tabs/focus tokens describe a process that is
+                // gone, so drop them at the exit observation instead of waiting
+                // for the TTL sweep or the next report.
+                if agent == Agent::OpenCode && self.clear_opencode_reserved_tokens() {
+                    self.revision = self.revision.wrapping_add(1);
+                }
             }
         } else if agent.is_some() {
             self.recent_agent_process_exit = None;

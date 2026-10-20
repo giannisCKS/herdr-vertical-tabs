@@ -515,6 +515,207 @@ impl TerminalState {
             metadata.applies_to_source.as_deref(),
         )
     }
+
+    /// The live, unexpired OpenCode root tab snapshot stored for this pane.
+    ///
+    /// Expiry is enforced from the stored `expiresAtMs` so a focus validation
+    /// fails closed even before the token TTL sweep removes the value.
+    pub(crate) fn opencode_tabs_snapshot(
+        &self,
+        _now: Instant,
+    ) -> Option<crate::opencode_tabs::TabSnapshot> {
+        if self.metadata_report_blocked_by_process_exit(
+            crate::opencode_tabs::TABS_SOURCE,
+            Some(crate::opencode_tabs::OPENCODE_AGENT),
+            None,
+        ) {
+            return None;
+        }
+        let raw = self
+            .metadata_tokens
+            .values()
+            .get(crate::opencode_tabs::TABS_TOKEN)
+            .cloned()?;
+        let snapshot = crate::opencode_tabs::parse_snapshot(&raw).ok()?;
+        crate::opencode_tabs::snapshot_is_live(&snapshot, crate::opencode_tabs::unix_millis())
+            .then_some(snapshot)
+    }
+
+    /// Validates an OpenCode tab snapshot report WITHOUT storing it.
+    ///
+    /// Splitting validation from storage lets the report handler reject before
+    /// sequence acceptance, so an ignored (stale) report never mutates tokens.
+    pub(crate) fn validate_opencode_tabs_token(
+        &self,
+        raw: &str,
+    ) -> Result<crate::opencode_tabs::TabSnapshot, crate::opencode_tabs::TabError> {
+        crate::opencode_tabs::parse_snapshot(raw)
+    }
+
+    /// Validates an OpenCode tab focus report WITHOUT storing it.
+    ///
+    /// The addressed pane must hold a live snapshot for the same owner that
+    /// still contains the requested session.
+    pub(crate) fn validate_opencode_focus_token(
+        &self,
+        raw: &str,
+        now: Instant,
+    ) -> Result<crate::opencode_tabs::FocusRequest, crate::opencode_tabs::TabError> {
+        let request = crate::opencode_tabs::parse_focus_request(raw)?;
+        // Process evidence outranks a stored snapshot: a pane whose OpenCode
+        // process exited is not a live OpenCode pane, even if a snapshot is
+        // still present.
+        if self.metadata_report_blocked_by_process_exit(
+            crate::opencode_tabs::FOCUS_SOURCE,
+            Some(crate::opencode_tabs::OPENCODE_AGENT),
+            None,
+        ) {
+            return Err(crate::opencode_tabs::TabError {
+                code: "invalid_opencode_focus",
+                message: "focus target pane has no live opencode process".into(),
+            });
+        }
+        let Some(snapshot) = self.opencode_tabs_snapshot(now) else {
+            return Err(crate::opencode_tabs::TabError {
+                code: "invalid_opencode_focus",
+                message: "focus target has no live opencode tabs snapshot".into(),
+            });
+        };
+        if snapshot.owner != request.owner
+            || !snapshot
+                .tabs
+                .iter()
+                .any(|tab| tab.session_id == request.session_id)
+        {
+            return Err(crate::opencode_tabs::TabError {
+                code: "invalid_opencode_focus",
+                message: "focus target is not a live opencode tab".into(),
+            });
+        }
+        Ok(request)
+    }
+
+    /// Stores a validated OpenCode tab snapshot with its fixed TTL.
+    ///
+    /// A non-empty snapshot with a new owner replaces the old owner and clears
+    /// any pending focus token. An empty snapshot only clears a matching owner.
+    pub(crate) fn commit_opencode_tabs_snapshot(
+        &mut self,
+        snapshot: crate::opencode_tabs::TabSnapshot,
+        now: Instant,
+    ) -> bool {
+        if self.metadata_report_blocked_by_process_exit(
+            crate::opencode_tabs::TABS_SOURCE,
+            Some(crate::opencode_tabs::OPENCODE_AGENT),
+            None,
+        ) {
+            return self.clear_opencode_reserved_tokens();
+        }
+        let previous = self.opencode_tabs_snapshot(now);
+        if snapshot.tabs.is_empty() {
+            let Some(previous) = previous else {
+                return false;
+            };
+            if previous.owner != snapshot.owner {
+                return false;
+            }
+            let mut changed = self.metadata_tokens.patch(
+                clear_reserved_patch(crate::opencode_tabs::TABS_TOKEN),
+                None,
+                now,
+            );
+            changed |= self.metadata_tokens.patch(
+                clear_reserved_patch(crate::opencode_tabs::FOCUS_TOKEN),
+                None,
+                now,
+            );
+            return changed;
+        }
+
+        let owner_changed = previous
+            .as_ref()
+            .is_none_or(|previous| previous.owner != snapshot.owner);
+        let mut stored = snapshot;
+        stored.expires_at_ms = Some(
+            crate::opencode_tabs::unix_millis().saturating_add(crate::opencode_tabs::TABS_TTL_MS),
+        );
+        let value = crate::opencode_tabs::encode_snapshot(&stored);
+        let patch = HashMap::from([(crate::opencode_tabs::TABS_TOKEN.to_string(), Some(value))]);
+        let mut changed = self.metadata_tokens.patch(
+            patch,
+            Some(Duration::from_millis(crate::opencode_tabs::TABS_TTL_MS)),
+            now,
+        );
+        if owner_changed {
+            changed |= self.metadata_tokens.patch(
+                clear_reserved_patch(crate::opencode_tabs::FOCUS_TOKEN),
+                None,
+                now,
+            );
+        }
+        changed
+    }
+
+    /// Stores a validated OpenCode tab focus request with its fixed TTL.
+    pub(crate) fn commit_opencode_focus_request(
+        &mut self,
+        request: crate::opencode_tabs::FocusRequest,
+        now: Instant,
+    ) -> bool {
+        let mut stored = request;
+        stored.expires_at_ms = Some(
+            crate::opencode_tabs::unix_millis().saturating_add(crate::opencode_tabs::FOCUS_TTL_MS),
+        );
+        let value = crate::opencode_tabs::encode_focus_request(&stored);
+        let patch = HashMap::from([(crate::opencode_tabs::FOCUS_TOKEN.to_string(), Some(value))]);
+        self.metadata_tokens.patch(
+            patch,
+            Some(Duration::from_millis(crate::opencode_tabs::FOCUS_TTL_MS)),
+            now,
+        )
+    }
+
+    /// Validates then stores an OpenCode tab snapshot (test-facing wrapper).
+    #[cfg(test)]
+    pub(crate) fn apply_opencode_tabs_token(
+        &mut self,
+        raw: &str,
+        now: Instant,
+    ) -> Result<bool, crate::opencode_tabs::TabError> {
+        let snapshot = self.validate_opencode_tabs_token(raw)?;
+        Ok(self.commit_opencode_tabs_snapshot(snapshot, now))
+    }
+
+    /// Validates then stores an OpenCode tab focus request (test-facing wrapper).
+    #[cfg(test)]
+    pub(crate) fn apply_opencode_focus_token(
+        &mut self,
+        raw: &str,
+        now: Instant,
+    ) -> Result<bool, crate::opencode_tabs::TabError> {
+        let request = self.validate_opencode_focus_token(raw, now)?;
+        Ok(self.commit_opencode_focus_request(request, now))
+    }
+
+    /// Clears both reserved OpenCode tokens, returning whether anything changed.
+    pub(crate) fn clear_opencode_reserved_tokens(&mut self) -> bool {
+        let now = Instant::now();
+        let mut changed = self.metadata_tokens.patch(
+            clear_reserved_patch(crate::opencode_tabs::TABS_TOKEN),
+            None,
+            now,
+        );
+        changed |= self.metadata_tokens.patch(
+            clear_reserved_patch(crate::opencode_tabs::FOCUS_TOKEN),
+            None,
+            now,
+        );
+        changed
+    }
+}
+
+fn clear_reserved_patch(key: &str) -> HashMap<String, Option<String>> {
+    HashMap::from([(key.to_string(), None)])
 }
 
 #[cfg(test)]
@@ -1175,5 +1376,272 @@ mod tests {
         let presentation = terminal.effective_presentation();
         assert_eq!(presentation.title, None);
         assert_eq!(presentation.display_agent.as_deref(), Some("Fresh display"));
+    }
+
+    fn opencode_tabs_owner() -> &'static str {
+        "0123456789abcdef0123456789abcdef"
+    }
+
+    fn opencode_tabs_json(owner: &str, tabs: &str) -> String {
+        format!(r#"{{"v":1,"owner":"{owner}","tabs":[{tabs}]}}"#)
+    }
+
+    fn opencode_focus_json(owner: &str, session: &str) -> String {
+        format!(
+            r#"{{"v":1,"owner":"{owner}","sessionID":"{session}","requestID":"{}"}}"#,
+            "a".repeat(32)
+        )
+    }
+
+    #[test]
+    fn opencode_tabs_snapshot_stores_validates_and_clears_for_matching_owner() {
+        let mut terminal = test_terminal();
+        let now = Instant::now();
+        let owner = opencode_tabs_owner();
+        let raw = opencode_tabs_json(
+            owner,
+            r#"{"sessionID":"ses-1","title":"Root","active":true,"unread":true}"#,
+        );
+        assert_eq!(terminal.apply_opencode_tabs_token(&raw, now), Ok(true));
+
+        let stored = terminal.metadata_tokens.values()[crate::opencode_tabs::TABS_TOKEN].clone();
+        let decoded = crate::opencode_tabs::parse_snapshot(&stored).unwrap();
+        assert!(decoded.expires_at_ms.is_some());
+        assert_eq!(decoded.owner, owner);
+        assert_eq!(
+            terminal.opencode_tabs_snapshot(now).unwrap().tabs[0].session_id,
+            "ses-1"
+        );
+
+        let clear = opencode_tabs_json(owner, "");
+        assert_eq!(terminal.apply_opencode_tabs_token(&clear, now), Ok(true));
+        assert!(!terminal
+            .metadata_tokens
+            .values()
+            .contains_key(crate::opencode_tabs::TABS_TOKEN));
+        assert!(terminal.opencode_tabs_snapshot(now).is_none());
+    }
+
+    #[test]
+    fn opencode_tabs_empty_snapshot_from_other_owner_is_ignored() {
+        let mut terminal = test_terminal();
+        let now = Instant::now();
+        let raw = opencode_tabs_json(
+            opencode_tabs_owner(),
+            r#"{"sessionID":"ses-1","title":"Root"}"#,
+        );
+        assert_eq!(terminal.apply_opencode_tabs_token(&raw, now), Ok(true));
+
+        let clear = opencode_tabs_json("ffffffffffffffffffffffffffffffff", "");
+        assert_eq!(terminal.apply_opencode_tabs_token(&clear, now), Ok(false));
+        assert!(terminal.opencode_tabs_snapshot(now).is_some());
+    }
+
+    #[test]
+    fn opencode_tabs_owner_change_replaces_snapshot_and_clears_focus() {
+        let mut terminal = test_terminal();
+        let now = Instant::now();
+        let raw = opencode_tabs_json(
+            opencode_tabs_owner(),
+            r#"{"sessionID":"ses-1","title":"Root"}"#,
+        );
+        assert_eq!(terminal.apply_opencode_tabs_token(&raw, now), Ok(true));
+        let focus = opencode_focus_json(opencode_tabs_owner(), "ses-1");
+        assert_eq!(terminal.apply_opencode_focus_token(&focus, now), Ok(true));
+        assert!(terminal
+            .metadata_tokens
+            .values()
+            .contains_key(crate::opencode_tabs::FOCUS_TOKEN));
+
+        let replacement = opencode_tabs_json(
+            "ffffffffffffffffffffffffffffffff",
+            r#"{"sessionID":"ses-2","title":"Second"}"#,
+        );
+        assert_eq!(
+            terminal.apply_opencode_tabs_token(&replacement, now),
+            Ok(true)
+        );
+        assert!(!terminal
+            .metadata_tokens
+            .values()
+            .contains_key(crate::opencode_tabs::FOCUS_TOKEN));
+        let snapshot = terminal.opencode_tabs_snapshot(now).unwrap();
+        assert_eq!(snapshot.owner, "ffffffffffffffffffffffffffffffff");
+        assert_eq!(snapshot.tabs[0].session_id, "ses-2");
+    }
+
+    #[test]
+    fn opencode_tabs_focus_requires_live_matching_snapshot() {
+        let mut terminal = test_terminal();
+        let now = Instant::now();
+        let missing = opencode_focus_json(opencode_tabs_owner(), "ses-1");
+        assert!(terminal.apply_opencode_focus_token(&missing, now).is_err());
+
+        let raw = opencode_tabs_json(
+            opencode_tabs_owner(),
+            r#"{"sessionID":"ses-1","title":"Root"}"#,
+        );
+        terminal.apply_opencode_tabs_token(&raw, now).unwrap();
+
+        let unknown_session = opencode_focus_json(opencode_tabs_owner(), "ses-other");
+        assert!(terminal
+            .apply_opencode_focus_token(&unknown_session, now)
+            .is_err());
+        let wrong_owner = opencode_focus_json("ffffffffffffffffffffffffffffffff", "ses-1");
+        assert!(terminal
+            .apply_opencode_focus_token(&wrong_owner, now)
+            .is_err());
+        assert!(!terminal
+            .metadata_tokens
+            .values()
+            .contains_key(crate::opencode_tabs::FOCUS_TOKEN));
+
+        let accepted = opencode_focus_json(opencode_tabs_owner(), "ses-1");
+        assert_eq!(
+            terminal.apply_opencode_focus_token(&accepted, now),
+            Ok(true)
+        );
+        let stored = terminal.metadata_tokens.values()[crate::opencode_tabs::FOCUS_TOKEN].clone();
+        assert!(crate::opencode_tabs::parse_focus_request(&stored)
+            .unwrap()
+            .expires_at_ms
+            .is_some());
+    }
+
+    #[test]
+    fn opencode_tabs_snapshot_ignores_writes_after_opencode_process_exit() {
+        let mut terminal = test_terminal();
+        let now = Instant::now();
+        terminal.set_detected_state_with_visible_blocker(
+            Some(Agent::OpenCode),
+            AgentState::Working,
+            false,
+            false,
+            true,
+        );
+        let raw = opencode_tabs_json(
+            opencode_tabs_owner(),
+            r#"{"sessionID":"ses-1","title":"Root"}"#,
+        );
+        terminal.apply_opencode_tabs_token(&raw, now).unwrap();
+        assert!(terminal.opencode_tabs_snapshot(now).is_none());
+    }
+
+    #[test]
+    fn opencode_tabs_process_exit_immediately_clears_reserved_tokens() {
+        let mut terminal = test_terminal();
+        let now = Instant::now();
+        let raw = opencode_tabs_json(
+            opencode_tabs_owner(),
+            r#"{"sessionID":"ses-1","title":"Root"}"#,
+        );
+        assert_eq!(terminal.apply_opencode_tabs_token(&raw, now), Ok(true));
+        assert_eq!(
+            terminal.apply_opencode_focus_token(
+                &opencode_focus_json(opencode_tabs_owner(), "ses-1"),
+                now
+            ),
+            Ok(true)
+        );
+        let revision_before = terminal.revision;
+
+        terminal.set_detected_state_with_visible_blocker(
+            Some(Agent::OpenCode),
+            AgentState::Idle,
+            false,
+            false,
+            true,
+        );
+
+        let tokens = terminal.metadata_tokens.values();
+        assert!(!tokens.contains_key(crate::opencode_tabs::TABS_TOKEN));
+        assert!(!tokens.contains_key(crate::opencode_tabs::FOCUS_TOKEN));
+        assert!(terminal.revision > revision_before);
+        assert!(terminal.opencode_tabs_snapshot(now).is_none());
+    }
+
+    #[test]
+    fn opencode_tabs_focus_is_rejected_after_opencode_process_exit() {
+        let mut terminal = test_terminal();
+        let now = Instant::now();
+        let raw = opencode_tabs_json(
+            opencode_tabs_owner(),
+            r#"{"sessionID":"ses-1","title":"Root"}"#,
+        );
+        assert_eq!(terminal.apply_opencode_tabs_token(&raw, now), Ok(true));
+
+        terminal.set_detected_state_with_visible_blocker(
+            Some(Agent::OpenCode),
+            AgentState::Idle,
+            false,
+            false,
+            true,
+        );
+
+        let error = terminal
+            .apply_opencode_focus_token(&opencode_focus_json(opencode_tabs_owner(), "ses-1"), now)
+            .unwrap_err();
+        assert_eq!(error.code, "invalid_opencode_focus");
+        assert!(error.message.contains("no live opencode process"));
+        assert!(!terminal
+            .metadata_tokens
+            .values()
+            .contains_key(crate::opencode_tabs::FOCUS_TOKEN));
+    }
+
+    #[test]
+    fn opencode_tabs_reserved_tokens_expire_on_their_fixed_ttl() {
+        let mut terminal = test_terminal();
+        let now = Instant::now();
+        let raw = opencode_tabs_json(
+            opencode_tabs_owner(),
+            r#"{"sessionID":"ses-1","title":"Root"}"#,
+        );
+        terminal.apply_opencode_tabs_token(&raw, now).unwrap();
+        terminal
+            .apply_opencode_focus_token(&opencode_focus_json(opencode_tabs_owner(), "ses-1"), now)
+            .unwrap();
+
+        let focus_expiry = now
+            + Duration::from_millis(crate::opencode_tabs::FOCUS_TTL_MS)
+            + Duration::from_millis(1);
+        assert!(terminal.metadata_tokens.expire_at(focus_expiry));
+        assert!(!terminal
+            .metadata_tokens
+            .values()
+            .contains_key(crate::opencode_tabs::FOCUS_TOKEN));
+        assert!(terminal
+            .metadata_tokens
+            .values()
+            .contains_key(crate::opencode_tabs::TABS_TOKEN));
+
+        let tabs_expiry = now
+            + Duration::from_millis(crate::opencode_tabs::TABS_TTL_MS)
+            + Duration::from_millis(1);
+        assert!(terminal.metadata_tokens.expire_at(tabs_expiry));
+        assert!(terminal.opencode_tabs_snapshot(tabs_expiry).is_none());
+    }
+
+    #[test]
+    fn opencode_tabs_reserved_tokens_leave_generic_metadata_untouched() {
+        let mut terminal = test_terminal();
+        let now = Instant::now();
+        terminal.metadata_tokens.patch(
+            HashMap::from([("summary".to_string(), Some("keep me".to_string()))]),
+            None,
+            now,
+        );
+        let raw = opencode_tabs_json(
+            opencode_tabs_owner(),
+            r#"{"sessionID":"ses-1","title":"Root"}"#,
+        );
+        assert_eq!(terminal.apply_opencode_tabs_token(&raw, now), Ok(true));
+        assert_eq!(terminal.metadata_tokens.values()["summary"], "keep me");
+        assert!(terminal.clear_opencode_reserved_tokens());
+        assert_eq!(terminal.metadata_tokens.values()["summary"], "keep me");
+        assert!(!terminal
+            .metadata_tokens
+            .values()
+            .contains_key(crate::opencode_tabs::TABS_TOKEN));
     }
 }

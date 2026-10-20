@@ -50,7 +50,8 @@ pub(super) struct AggregateAgentRow<'a> {
 
 pub(super) struct AggregateAgentTarget {
     pub(super) endpoint_id: ClientEndpointId,
-    pub(super) pane_id: String,
+    pub(super) identity: super::agent_sidebar::AgentIdentity,
+    pub(super) active: bool,
 }
 
 pub(super) fn aggregate_agent_rows<'a>(
@@ -268,9 +269,16 @@ pub(super) fn online_agent_targets(
     aggregate_agent_rows(endpoints, active_endpoint_id, sort)
         .into_iter()
         .filter(|row| !row.endpoint.stale())
-        .map(|row| AggregateAgentTarget {
-            endpoint_id: row.endpoint.endpoint_id.clone(),
-            pane_id: row.agent.pane_id.clone(),
+        .flat_map(|row| {
+            let endpoint_id = row.endpoint.endpoint_id.clone();
+            super::agent_sidebar::agent_identity_entries(row.endpoint.snapshot, &row.agent.pane_id)
+                .into_iter()
+                .map(move |(identity, active)| AggregateAgentTarget {
+                    endpoint_id: endpoint_id.clone(),
+                    identity,
+                    active,
+                })
+                .collect::<Vec<_>>()
         })
         .collect()
 }

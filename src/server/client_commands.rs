@@ -29,6 +29,7 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "pane.link.activate",
     "pane.link.resolve",
     "pane.rename",
+    "pane.report_metadata",
     "pane.resize",
     "pane.scroll",
     "pane.selection.read",
@@ -297,6 +298,12 @@ mod tests {
             actual.remove("pane.link.resolve").as_deref(),
             Some("f5e4a3e01453ae7b188f127ce951c12c20e0bebcc17cc364eeb6d1a01fd5bf81")
         );
+        // The client-owned shell needs this method to report the OpenCode tab
+        // focus token, so it joins the advertised lane additively.
+        assert_eq!(
+            actual.remove("pane.report_metadata").as_deref(),
+            Some("c288588cf8ee53e966fa3f060d3b03b7be2654852060d574107e93702e4ba7e7")
+        );
 
         assert_eq!(
             actual, expected,
@@ -378,6 +385,31 @@ mod tests {
         )));
         assert!(!supports_client_shell_method(&Method::ServerStop(
             crate::api::schema::EmptyParams::default(),
+        )));
+    }
+
+    #[test]
+    fn client_shell_lane_admits_and_advertises_pane_report_metadata() {
+        // The client-owned shell writes the OpenCode focus token through this
+        // method, and the same list is advertised to the client at handshake
+        // time. Drop it here and the click silently degrades to a bare pane
+        // focus: no focus token, no tab switch.
+        assert!(supports_client_shell_method(&Method::PaneReportMetadata(
+            crate::api::schema::PaneReportMetadataParams {
+                pane_id: "w1:p1".into(),
+                source: crate::opencode_tabs::FOCUS_SOURCE.into(),
+                agent: None,
+                applies_to_source: None,
+                title: None,
+                display_agent: None,
+                state_labels: std::collections::HashMap::new(),
+                tokens: std::collections::HashMap::new(),
+                clear_title: false,
+                clear_display_agent: false,
+                clear_state_labels: false,
+                seq: None,
+                ttl_ms: Some(crate::opencode_tabs::FOCUS_TTL_MS),
+            }
         )));
     }
 

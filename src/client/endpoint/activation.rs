@@ -875,10 +875,23 @@ impl PendingEndpointActivation {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn complete(
         &mut self,
         shell: &mut crate::client::shell::ClientShellState,
         endpoints: &mut EndpointRegistry,
+    ) -> Result<ActivationCompletion, String> {
+        let mut outcome = crate::client::shell::ClientShellInput::default();
+        self.complete_with_outcome(shell, endpoints, &mut outcome)
+    }
+
+    /// Completes activation and records delayed shell output, such as the
+    /// OpenCode tab focus that waited for the target snapshot.
+    pub(crate) fn complete_with_outcome(
+        &mut self,
+        shell: &mut crate::client::shell::ClientShellState,
+        endpoints: &mut EndpointRegistry,
+        outcome: &mut crate::client::shell::ClientShellInput,
     ) -> Result<ActivationCompletion, String> {
         if let ActivationPhase::SynchronizingPresentation {
             lease,
@@ -915,6 +928,12 @@ impl PendingEndpointActivation {
             ..
         } = &self.phase
         {
+            // The target pane focus was already requested through the focus lane. Report the
+            // deferred OpenCode tab only once activation committed and the fresh snapshot has
+            // been installed, so the token cannot describe a different endpoint generation.
+            if matches!(completion.as_ref(), ActivationCompletion::Activated) {
+                shell.send_pending_opencode_focus(outcome);
+            }
             return Ok((**completion).clone());
         }
 

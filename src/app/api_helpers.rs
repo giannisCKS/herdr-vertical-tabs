@@ -278,6 +278,60 @@ pub(super) fn normalize_metadata_tokens(
         .collect()
 }
 
+/// A reserved OpenCode token report extracted before generic token handling.
+///
+/// The generic token path trims and truncates values to 80 characters, so the
+/// reserved tokens are recognized on the raw request first and validated in
+/// full by [`crate::opencode_tabs`].
+pub(super) struct ReservedTokenRequest {
+    pub key: &'static str,
+    pub value: String,
+}
+
+/// Extracts the reserved OpenCode token report from a raw token patch.
+///
+/// Returns `Ok(None)` when the patch carries no reserved token. A reserved
+/// token must be the only token in the patch, must carry a JSON value, and must
+/// use the source that owns it.
+pub(super) fn normalize_reserved_opencode_token(
+    tokens: &std::collections::HashMap<String, Option<String>>,
+    source: &str,
+) -> Result<Option<ReservedTokenRequest>, (&'static str, String)> {
+    let Some(key) = crate::opencode_tabs::reserved_token_key(tokens) else {
+        return Ok(None);
+    };
+    let key: &'static str = if key == crate::opencode_tabs::TABS_TOKEN {
+        crate::opencode_tabs::TABS_TOKEN
+    } else {
+        crate::opencode_tabs::FOCUS_TOKEN
+    };
+    if tokens.len() != 1 {
+        return Err((
+            "invalid_metadata_request",
+            "reserved opencode tokens cannot be mixed with other metadata tokens".into(),
+        ));
+    }
+    let Some(required) = crate::opencode_tabs::source_for_token(key) else {
+        return Err((
+            "invalid_metadata_source",
+            format!("{key} has no owning metadata source"),
+        ));
+    };
+    if source != required {
+        return Err((
+            "invalid_metadata_source",
+            format!("{key} requires source {required}"),
+        ));
+    }
+    let Some(value) = tokens.get(key).and_then(|value| value.clone()) else {
+        return Err((
+            "invalid_metadata_request",
+            format!("{key} requires a JSON value"),
+        ));
+    };
+    Ok(Some(ReservedTokenRequest { key, value }))
+}
+
 #[cfg(test)]
 mod metadata_token_tests {
     use super::*;
@@ -312,5 +366,49 @@ mod metadata_token_tests {
             .map(|index| (format!("key{index}"), Some("value".into())))
             .collect();
         assert!(normalize_metadata_tokens(too_many).is_err());
+    }
+
+    #[test]
+    fn opencode_tabs_reserved_requests_require_single_token_and_matching_source() {
+        let tabs_owner = "0123456789abcdef0123456789abcdef";
+        let tabs_value = format!(r#"{{"v":1,"owner":"{tabs_owner}","tabs":[]}}"#);
+        let tabs = std::collections::HashMap::from([(
+            crate::opencode_tabs::TABS_TOKEN.to_string(),
+            Some(tabs_value.clone()),
+        )]);
+        let request =
+            normalize_reserved_opencode_token(&tabs, crate::opencode_tabs::TABS_SOURCE).unwrap();
+        let request = request.expect("reserved token is recognized");
+        assert_eq!(request.key, crate::opencode_tabs::TABS_TOKEN);
+        // Full value survives; the generic 80-character limit does not apply.
+        assert_eq!(request.value, tabs_value);
+
+        assert!(
+            normalize_reserved_opencode_token(&tabs, crate::opencode_tabs::FOCUS_SOURCE).is_err()
+        );
+
+        let mixed = std::collections::HashMap::from([
+            (
+                crate::opencode_tabs::TABS_TOKEN.to_string(),
+                Some(tabs_value),
+            ),
+            ("summary".to_string(), Some("value".to_string())),
+        ]);
+        assert!(
+            normalize_reserved_opencode_token(&mixed, crate::opencode_tabs::TABS_SOURCE).is_err()
+        );
+
+        let null_value =
+            std::collections::HashMap::from([(crate::opencode_tabs::TABS_TOKEN.to_string(), None)]);
+        assert!(
+            normalize_reserved_opencode_token(&null_value, crate::opencode_tabs::TABS_SOURCE)
+                .is_err()
+        );
+
+        let ordinary =
+            std::collections::HashMap::from([("summary".to_string(), Some("value".to_string()))]);
+        assert!(normalize_reserved_opencode_token(&ordinary, "custom:pi")
+            .unwrap()
+            .is_none());
     }
 }

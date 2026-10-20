@@ -50,6 +50,8 @@ pub(crate) fn render_collapsed_sidebar(
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
     selected_workspace_id: Option<&str>,
+    endpoint_id: &ClientEndpointId,
+    agent_selection: Option<&super::agent_sidebar::AgentSelection>,
     hits: &mut ShellHitMap,
 ) {
     let palette = &config.palette;
@@ -127,25 +129,20 @@ pub(crate) fn render_collapsed_sidebar(
         detail_area.width,
         detail_area.height.saturating_sub(1),
     );
-    for (index, pane_id) in super::ordered_agent_pane_ids(snapshot, config.agent_panel_sort)
+    let mut rows = super::agent_sidebar::agent_rows(snapshot, config, None);
+    super::agent_sidebar::apply_selection_intent(&mut rows, endpoint_id, agent_selection);
+    for (index, row) in rows
         .into_iter()
         .take(detail_content.height as usize)
         .enumerate()
     {
-        let Some(agent) = snapshot
-            .agents
-            .iter()
-            .find(|agent| agent.pane_id == pane_id)
-        else {
-            continue;
-        };
         let rect = Rect::new(
             detail_content.x,
             detail_content.y + index as u16,
             detail_content.width,
             1,
         );
-        if agent.focused {
+        if row.focused {
             buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
         }
         put_text(
@@ -154,7 +151,7 @@ pub(crate) fn render_collapsed_sidebar(
             rect.y,
             rect.width.min(2),
             &format!("{:<2}", index + 1),
-            Style::default().fg(if agent.focused {
+            Style::default().fg(if row.focused {
                 palette.text
             } else {
                 palette.overlay0
@@ -165,10 +162,10 @@ pub(crate) fn render_collapsed_sidebar(
             rect.x.saturating_add(2),
             rect.y,
             rect.width.saturating_sub(2),
-            status_icon(agent.agent_status, config.status_indicators),
-            Style::default().fg(status_color(agent.agent_status, palette)),
+            status_icon(row.status, config.status_indicators),
+            Style::default().fg(status_color(row.status, palette)),
         );
-        hits.agents.push((rect, pane_id));
+        hits.agents.push((rect, row.identity));
     }
     hits.sidebar_toggle = if area.is_empty() || workspace_area.width == 0 {
         Rect::default()
@@ -448,6 +445,8 @@ pub(crate) fn render_sidebar(
         snapshot,
         config,
         state.agent_scroll,
+        state.active_endpoint_id,
+        state.agent_selection,
         hits,
     );
 

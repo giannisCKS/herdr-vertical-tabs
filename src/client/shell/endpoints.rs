@@ -244,8 +244,16 @@ impl ClientShellState {
             // The aggregate agent list belongs to the client, not one endpoint.
             self.agent_scroll = agent_scroll;
         }
-        if let Some((_, pane_id)) = pending_agent_reveal {
-            self.reveal_endpoint_agent(endpoint_id, &pane_id, agent_body_height);
+        if let Some((_, identity)) = pending_agent_reveal {
+            self.reveal_endpoint_agent(endpoint_id, &identity, agent_body_height);
+        }
+        if switching_endpoint
+            && self
+                .pending_opencode_focus
+                .as_ref()
+                .is_none_or(|(pending_endpoint, ..)| pending_endpoint != endpoint_id)
+        {
+            self.pending_opencode_focus = None;
         }
         true
     }

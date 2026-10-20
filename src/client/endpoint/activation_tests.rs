@@ -70,6 +70,47 @@ fn test_snapshot(boot_id: &str, revision: u64) -> crate::protocol::ClientShellSn
     }
 }
 
+const OPENCODE_OWNER: &str = "0123456789abcdef0123456789abcdef";
+
+fn snapshot_with_opencode_tabs(
+    boot_id: &str,
+    revision: u64,
+    tabs: &str,
+) -> crate::protocol::ClientShellSnapshot {
+    let mut snapshot = test_snapshot(boot_id, revision);
+    snapshot.agents.push(crate::protocol::ClientShellAgent {
+        pane_id: "pane_1".into(),
+        workspace_id: "ws_1".into(),
+        tab_id: "tab_1".into(),
+        name: Some("opencode".into()),
+        display_agent: Some("OpenCode".into()),
+        agent: Some("opencode".into()),
+        title: None,
+        terminal_title: None,
+        terminal_title_stripped: None,
+        agent_status: crate::api::schema::AgentStatus::Idle,
+        state_change_seq: 0,
+        state_labels: Vec::new(),
+        tokens: vec![(
+            crate::opencode_tabs::TABS_TOKEN.into(),
+            format!(r#"{{"v":1,"owner":"{OPENCODE_OWNER}","tabs":{tabs}}}"#),
+        )],
+        focused: true,
+    });
+    snapshot
+}
+
+fn snapshot_with_opencode_tab(
+    boot_id: &str,
+    revision: u64,
+) -> crate::protocol::ClientShellSnapshot {
+    snapshot_with_opencode_tabs(
+        boot_id,
+        revision,
+        r#"[{"sessionID":"ses_a","title":"one","active":true,"busy":false,"attention":false,"unread":false}]"#,
+    )
+}
+
 type SentMessages = std::sync::Arc<std::sync::Mutex<Vec<crate::protocol::ClientMessage>>>;
 type TestFixture = (
     crate::client::ClientShellState,
@@ -1788,6 +1829,201 @@ fn losing_local_during_handoff_does_not_revoke_the_healthy_target() {
             vec![true]
         );
     }
+}
+
+#[test]
+fn queued_opencode_tab_focus_reports_once_after_fresh_snapshot_revalidation() {
+    use crate::client::shell::{ClientShellAction, ClientShellInput};
+
+    for (session_id, expect_report) in [("ses_a", true), ("ses_missing", false)] {
+        let (mut shell, mut endpoints, _local_sent, _remote_sent) = shell_and_registry();
+        shell.set_endpoint_snapshot_for_generation(
+            &endpoint(),
+            7,
+            Box::new(snapshot_with_opencode_tab("remote-boot", 2)),
+        );
+        assert!(shell.activate_endpoint_projection(&endpoint()));
+        shell.queue_pending_opencode_focus_for_test(
+            endpoint(),
+            "pane_1",
+            OPENCODE_OWNER,
+            session_id,
+        );
+
+        let mut activation = machine();
+        activation.phase = ActivationPhase::AwaitingPresentationEffects {
+            lease: activation.target.clone(),
+            token: "80:1:remote-boot".into(),
+            ready: true,
+            completion: Box::new(ActivationCompletion::Activated),
+        };
+        let mut outcome = ClientShellInput::default();
+        assert_eq!(
+            activation.complete_with_outcome(&mut shell, &mut endpoints, &mut outcome),
+            Ok(ActivationCompletion::Activated)
+        );
+        assert_eq!(outcome.actions.len(), usize::from(expect_report));
+        if expect_report {
+            let [ClientShellAction::Endpoint { request, .. }] = outcome.actions.as_slice() else {
+                panic!("queued focus reports one metadata token");
+            };
+            let crate::api::schema::Method::PaneReportMetadata(params) = &request.method else {
+                panic!("expected pane.report_metadata");
+            };
+            assert_eq!(params.pane_id, "pane_1");
+            let raw = params
+                .tokens
+                .get(crate::opencode_tabs::FOCUS_TOKEN)
+                .and_then(Option::as_deref)
+                .expect("focus token");
+            let value: serde_json::Value = serde_json::from_str(raw).expect("focus JSON");
+            assert_eq!(value["owner"], OPENCODE_OWNER);
+            assert_eq!(value["sessionID"], "ses_a");
+        }
+
+        // A stale request is consumed, not retried, and a reported request is consumed too.
+        let mut repeated = ClientShellInput::default();
+        assert_eq!(
+            activation.complete_with_outcome(&mut shell, &mut endpoints, &mut repeated),
+            Ok(ActivationCompletion::Activated)
+        );
+        assert!(repeated.actions.is_empty());
+    }
+}
+
+#[test]
+fn active_local_fast_path_reports_pending_opencode_tab_focus_after_pane_focus() {
+    use crate::client::shell::{ClientEndpointFocusTarget, ClientShellInput};
+    use crate::client::{
+        endpoint_commands::EndpointCommands, shell_runtime::begin_endpoint_activation, ClientState,
+    };
+
+    let (mut shell, mut endpoints, local_sent, _) = shell_and_registry();
+    shell.set_endpoint_snapshot_for_generation(
+        &ClientEndpointId::Local,
+        1,
+        Box::new(snapshot_with_opencode_tabs(
+            "local-boot",
+            2,
+            r#"[{"sessionID":"ses_a","title":"root-a","active":true,"busy":false,"attention":false,"unread":false},{"sessionID":"ses_b","title":"root-b","active":false,"busy":false,"attention":false,"unread":false}]"#,
+        )),
+    );
+    assert!(shell.activate_endpoint_projection(&ClientEndpointId::Local));
+    let _ = endpoints.set_surface_active(&ClientEndpointId::Local, true);
+    assert!(endpoints.set_active(&ClientEndpointId::Local));
+    assert!(shell.multi_endpoint_active(), "Local must not be direct");
+
+    // The click path queues the nonselected root-b tab while Local is already active.
+    shell.queue_pending_opencode_focus_for_test(
+        ClientEndpointId::Local,
+        "pane_1",
+        OPENCODE_OWNER,
+        "ses_b",
+    );
+
+    let mut state = ClientState::test_new();
+    state.shell = Some(shell);
+    let mut commands = EndpointCommands::default();
+    let mut pending = None;
+    let mut scheduled = None;
+    begin_endpoint_activation(
+        &mut state,
+        &mut endpoints,
+        &mut commands,
+        &mut pending,
+        &mut 60,
+        ClientEndpointId::Local,
+        Some(ClientEndpointFocusTarget::Pane("pane_1".into())),
+        false,
+        Instant::now(),
+        &mut scheduled,
+    )
+    .unwrap();
+
+    assert!(pending.is_none(), "fast path must not start an activation");
+    assert!(scheduled.is_none());
+
+    let sent_requests = || {
+        local_sent
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|message| {
+                let crate::protocol::ClientMessage::ClientShellEndpointRequest {
+                    boot_id,
+                    request,
+                } = message
+                else {
+                    return None;
+                };
+                let request = serde_json::from_str::<crate::api::schema::Request>(request).ok()?;
+                Some((boot_id.clone(), request.id, request.method))
+            })
+            .collect::<Vec<_>>()
+    };
+    let after_focus = sent_requests();
+    assert_eq!(
+        after_focus.len(),
+        1,
+        "pane focus is the only in-flight request"
+    );
+    assert!(matches!(
+        &after_focus[0].2,
+        crate::api::schema::Method::PaneFocus(target) if target.pane_id == "pane_1"
+    ));
+
+    // Release the pane-focus lane, as the endpoint response would, then drain the report.
+    let (boot_id, request_id, _) = &after_focus[0];
+    let response = serde_json::to_vec(&crate::api::schema::SuccessResponse {
+        id: request_id.clone(),
+        result: crate::api::schema::ResponseResult::Pong {
+            version: "test".into(),
+            protocol: 1,
+            capabilities: None,
+        },
+    })
+    .unwrap();
+    assert!(commands
+        .receive_chunk(
+            &ClientEndpointId::Local,
+            1,
+            boot_id,
+            request_id,
+            true,
+            response,
+        )
+        .unwrap()
+        .is_some());
+    assert!(commands
+        .send_next(&ClientEndpointId::Local, &mut endpoints)
+        .is_empty());
+
+    let methods = sent_requests()
+        .into_iter()
+        .map(|(_, _, method)| method)
+        .collect::<Vec<_>>();
+    assert_eq!(methods.len(), 2, "pane focus then tab report");
+    let crate::api::schema::Method::PaneReportMetadata(params) = &methods[1] else {
+        panic!("expected pane.report_metadata");
+    };
+    assert_eq!(params.pane_id, "pane_1");
+    assert_eq!(params.source, crate::opencode_tabs::FOCUS_SOURCE);
+    let raw = params
+        .tokens
+        .get(crate::opencode_tabs::FOCUS_TOKEN)
+        .and_then(Option::as_deref)
+        .expect("focus token");
+    let value: serde_json::Value = serde_json::from_str(raw).expect("focus JSON");
+    assert_eq!(value["owner"], OPENCODE_OWNER);
+    assert_eq!(value["sessionID"], "ses_b");
+
+    let mut replay = ClientShellInput::default();
+    let shell = state.shell.as_mut().unwrap();
+    assert!(
+        !shell.send_pending_opencode_focus(&mut replay),
+        "pending focus must be consumed"
+    );
+    assert!(replay.actions.is_empty());
 }
 
 #[test]

@@ -103,8 +103,8 @@ pub(super) struct ShellHitMap {
     pub(super) panes: Vec<PaneHit>,
     pub(super) popup: Option<PaneHit>,
     pub(super) pane_splits: Vec<PaneSplitHit>,
-    pub(super) agents: Vec<(Rect, String)>,
-    pub(super) endpoint_agents: Vec<(Rect, ClientEndpointId, String)>,
+    pub(super) agents: Vec<(Rect, super::agent_sidebar::AgentIdentity)>,
+    pub(super) endpoint_agents: Vec<(Rect, ClientEndpointId, super::agent_sidebar::AgentIdentity)>,
     pub(super) agent_body: Rect,
     pub(super) agent_scrollbar: Rect,
     pub(super) agent_scroll_metrics: Option<crate::pane::ScrollMetrics>,
@@ -908,7 +908,21 @@ pub(crate) struct ClientShellState {
     pub(super) remote_collapsed_groups: HashMap<ClientEndpointId, HashSet<String>>,
     pub(super) workspace_scroll: usize,
     pub(super) agent_scroll: usize,
-    pub(super) pending_agent_reveal: Option<(ClientEndpointId, String)>,
+    pub(super) pending_agent_reveal:
+        Option<(ClientEndpointId, super::agent_sidebar::AgentIdentity)>,
+    /// Intended OpenCode tab selection shared by navigation and the highlight.
+    /// It outlives the focus request so repeat navigation does not read a stale
+    /// `tab.active` from the last snapshot. Cleared by acknowledgement, expiry,
+    /// membership loss, or an endpoint/pane switch.
+    pub(super) agent_selection: Option<super::agent_sidebar::AgentSelection>,
+    /// OpenCode tab focus requested while activating a non-active endpoint:
+    /// endpoint, real pane id, tab owner, tab session id. The runtime replays it
+    /// once the endpoint snapshot is installed.
+    pub(super) pending_opencode_focus: Option<(ClientEndpointId, String, String, String)>,
+    /// Monotonic expiry for `pending_opencode_focus`, matching the backend
+    /// focus token TTL. An activation that never commits drops the request
+    /// instead of replaying it later. `None` means no local deadline was set.
+    pub(super) pending_opencode_focus_deadline: Option<std::time::Instant>,
     pub(super) tab_scroll: usize,
     pub(super) mobile_switcher_scroll: usize,
     pub(super) reveal_focused_workspace: bool,
@@ -1090,6 +1104,9 @@ impl ClientShellState {
             workspace_scroll: 0,
             agent_scroll: 0,
             pending_agent_reveal: None,
+            agent_selection: None,
+            pending_opencode_focus: None,
+            pending_opencode_focus_deadline: None,
             tab_scroll: 0,
             mobile_switcher_scroll: 0,
             reveal_focused_workspace: true,
@@ -1673,6 +1690,7 @@ impl ClientShellState {
             }
         }
         self.snapshot = Some(snapshot);
+        self.reconcile_agent_selection();
         self.reconcile_pending_workspace_highlight();
         let pending_surface = self.pending_pane_surface.take();
         if let Some(surface) = pending_surface {

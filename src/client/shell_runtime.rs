@@ -282,7 +282,14 @@ pub(super) fn begin_endpoint_activation(
             .is_some_and(|connection| connection.surface_active);
     if already_active {
         if let (Some(shell), Some(target)) = (state.shell.as_mut(), target) {
-            let actions = shell.focus_endpoint_target(target);
+            let mut actions = shell.focus_endpoint_target(target);
+            // A Local selection with another endpoint present defers the OpenCode tab
+            // report while still taking this already-active fast path. Replay it after
+            // the pane focus, with the same deadline and snapshot validation as the
+            // activation completion path.
+            let mut focus_outcome = shell::ClientShellInput::default();
+            shell.send_pending_opencode_focus(&mut focus_outcome);
+            actions.extend(focus_outcome.actions);
             let (_, repaint) = dispatch_client_shell_actions(
                 actions,
                 endpoint_commands,
@@ -291,6 +298,7 @@ pub(super) fn begin_endpoint_activation(
                 &mut state.detached_process_children,
                 scheduled_activation,
             )?;
+            let repaint = repaint || focus_outcome.repaint;
             if repaint {
                 if let Some(frame) = shell.compose(state.reported_size.0, state.reported_size.1) {
                     state.present_frame(frame);
@@ -387,6 +395,7 @@ pub(super) fn complete_endpoint_activation(
     if let Some(endpoint_id) = sync_endpoint.as_ref() {
         state.replay_host_theme(endpoints, endpoint_id);
     }
+    let mut activation_outcome = shell::ClientShellInput::default();
     let completion = {
         let Some(activation) = pending.as_mut() else {
             return Ok(None);
@@ -394,7 +403,7 @@ pub(super) fn complete_endpoint_activation(
         let Some(shell) = state.shell.as_mut() else {
             return Ok(None);
         };
-        match activation.complete(shell, endpoints) {
+        match activation.complete_with_outcome(shell, endpoints, &mut activation_outcome) {
             Ok(completion) => completion,
             Err(error) => {
                 shell.receive_endpoint_unavailable(error);
@@ -429,6 +438,21 @@ pub(super) fn complete_endpoint_activation(
 
     let _ = pending.take();
     endpoints.unfreeze_input();
+    // Deferred OpenCode tab focus is released only after the activation fence opens. The
+    // request was revalidated against the freshly installed snapshot by the shell.
+    if !activation_outcome.actions.is_empty() {
+        let mut scheduled = None;
+        let (replay_mouse, _) = dispatch_client_shell_actions(
+            std::mem::take(&mut activation_outcome.actions),
+            endpoint_commands,
+            endpoints,
+            state.shell.as_mut(),
+            &mut state.detached_process_children,
+            &mut scheduled,
+        )?;
+        debug_assert!(replay_mouse.is_empty());
+        debug_assert!(scheduled.is_none());
+    }
     let successor = match completion {
         endpoint::ActivationCompletion::RestoredSource {
             error,
